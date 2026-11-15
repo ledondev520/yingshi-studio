@@ -111,6 +111,7 @@ class Slot:
         self.persist()
         if self.store.get(self.name):self.store.remove(self.name)
         with database() as c:
+            c.execute("UPDATE jobs SET state='queued',lease=NULL,deadline=NULL,wid=NULL,updated=?,message='原 GPU 运行时已结束，保留已完成镜头并重新调度' WHERE state='running' AND instr(wid,?||'/')=1",(int(time.time()),self.device))
             c.execute('delete from pool_boots where device=?',(self.device,))
             c.execute('delete from pool_signal where device=?',(self.device,))
             c.execute('delete from worker_drain where device=?',(self.device,))
