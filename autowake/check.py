@@ -65,5 +65,26 @@ def multiuser_pool():
         assert cl.assign.call_count==start.call_count==32
         for slot in slots:slot.step()
         assert cl.assign.call_count==32,'Restarting a poll must not allocate duplicate GPUs'
- print('PASS 32 independent provisioning reservations, repeated polls allocate no extra runtimes')
+        folders={'trashed11111':{'trashed':True},'canonical1111':{'trashed':False}};created=[];uploads=[]
+        auth=Mock()
+        def dget(url,params=None,timeout=0):
+            r=Mock(status_code=200);r.raise_for_status=lambda:None
+            if url.endswith('/files'):
+                live=[{'id':k} for k,v in folders.items() if not v['trashed']]
+                r.json=lambda:{'files':live[:1]};return r
+            fid=url.rsplit('/',1)[-1]
+            if fid not in folders:r.status_code=404;return r
+            r.json=lambda:{'id':fid,'trashed':folders[fid]['trashed']};return r
+        def dpost(url,params=None,json=None,headers=None,timeout=0):
+            r=Mock(status_code=200,headers={'Location':'https://www.googleapis.com/upload/session'});r.raise_for_status=lambda:None
+            if 'upload/' in url:uploads.append(json['parents'][0]);return r
+            nid=f'created{len(created)+1:05d}';folders[nid]={'trashed':False};created.append(nid);r.json=lambda:{'id':nid};return r
+        auth.get.side_effect=dget;auth.post.side_effect=dpost
+        slots[1].cache['folder']='trashed11111';slots[1].persist()
+        for s in slots:m.ticket(auth,'a'*32,s)
+        assert not created and uploads==['canonical1111']*len(slots) and all(s.cache['folder']=='canonical1111' for s in slots)
+        folders['canonical1111']['trashed']=True
+        m.ticket(auth,'b'*32,slots[0])
+        assert created==['created00001'] and slots[0].cache['folder']=='created00001'
+ print('PASS 32 independent provisioning reservations, repeated polls allocate no extra runtimes, drive folder dedup')
 if __name__=='__main__':multiuser_pool()

@@ -53,4 +53,9 @@ def available_work():
         except Assemble:pass
         assert order==[0,2,3] and len(poll)>=2
         assert [p.read_text() for p in sorted(root.glob('*/*.mp4'))]==['0','helper','2','3']
+        act=root/'jobs';vids=root/'videos';act.mkdir();vids.mkdir();done=[]
+        env.update(ACTIVE_DIR=act,videos=vids,rpc=lambda r,d:done.append(d),drive_result=lambda p:'https://drive.google.com/file/d/abcdefghij/view',
+                   h3_music_policy=lambda *a:(False,'orig'),ff=lambda *a:Path(a[-1]).write_bytes(b'mp4'))
+        env['render_job'](dict(id='donejob',lease_token='t',prompt='海',seconds=15,shots=[{'seconds':15,'prompt':'海'}]))
+        assert not list(act.iterdir()) and len(list(vids.glob('studio-*.mp4')))==1 and done[-1]['state']=='done'
 if __name__=='__main__':available_work()

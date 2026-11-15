@@ -26,11 +26,35 @@ def database():
 def creds():
     s=AuthorizedSession(Credentials.from_authorized_user_file(str(TOKEN)))
     s.headers['X-Goog-User-Project']=PROJECT;return s
+FOLDER_NAME='映室 H3 自动成片'
+def _folder_alive(auth,fid):
+    if not fid or not re.fullmatch(r'[\w-]{10,160}',str(fid)):return False
+    r=auth.get('https://www.googleapis.com/drive/v3/files/'+fid,params={'fields':'id,trashed'},timeout=15)
+    if r.status_code in (403,404):return False
+    r.raise_for_status();return not r.json().get('trashed')
+def ensure_folder(auth,slot):
+    shared=PRIVATE/'drive-folder.json'
+    with open(PRIVATE/'drive-folder.lock','a') as lk:
+        fcntl.flock(lk,fcntl.LOCK_EX)
+        cand=None
+        if shared.is_file():
+            try:cand=json.loads(shared.read_text()).get('folder')
+            except Exception:cand=None
+        for fid in ([cand] if cand else [])+([slot.cache.get('folder')] if slot.cache.get('folder') and slot.cache.get('folder')!=cand else []):
+            if _folder_alive(auth,fid):
+                if cand!=fid:save(shared,{'folder':fid})
+                if slot.cache.get('folder')!=fid:slot.cache['folder']=fid;slot.persist()
+                return fid
+        q=f"name='{FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        sr=auth.get('https://www.googleapis.com/drive/v3/files',params={'q':q,'orderBy':'createdTime','pageSize':1,'fields':'files(id)'},timeout=25);sr.raise_for_status()
+        files=sr.json().get('files') or []
+        if files:fid=files[0]['id']
+        else:
+            cr=auth.post('https://www.googleapis.com/drive/v3/files',json={'name':FOLDER_NAME,'mimeType':'application/vnd.google-apps.folder'},timeout=25);cr.raise_for_status()
+            fid=cr.json()['id']
+        save(shared,{'folder':fid});slot.cache['folder']=fid;slot.persist();return fid
 def ticket(auth,job,slot):
-    folder=slot.cache.get('folder')
-    if not folder:
-        r=auth.post('https://www.googleapis.com/drive/v3/files',json={'name':'映室 H3 自动成片','mimeType':'application/vnd.google-apps.folder'},timeout=25);r.raise_for_status()
-        folder=slot.cache['folder']=r.json()['id'];slot.persist()
+    folder=ensure_folder(auth,slot)
     r=auth.post('https://www.googleapis.com/upload/drive/v3/files',params={'uploadType':'resumable','fields':'id'},json={'name':'H3-'+job+'.mp4','parents':[folder]},headers={'X-Upload-Content-Type':'video/mp4'},timeout=25)
     r.raise_for_status();return r.headers['Location']
 def setup(c):
