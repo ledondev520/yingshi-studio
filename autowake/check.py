@@ -163,3 +163,28 @@ def lost_runtime_reschedules():
     cl.assign.assert_not_called()
  print('PASS a confirmed missing runtime requeues its own job immediately without waiting for its lease')
 if __name__=='__main__':lost_runtime_reschedules()
+
+def connection_recovery():
+ """Fresh worker heartbeats must not suppress kernel reconnection after a deploy."""
+ from types import SimpleNamespace
+ with tempfile.TemporaryDirectory() as tmp:
+    root=Path(tmp);server.DATA=root;server.setup();m.DB=root/'studio.sqlite';m.PRIVATE=root;m.TOKEN=root/'token';m.TOKEN.touch()
+    t=int(time.time());cl=Mock();state=SimpleNamespace(endpoint='runtimes/live',kernel_id='existing',url='https://runtime.invalid',token='test')
+    links=[]
+    def connect(s,kid):
+        assert kid=='existing';link=Mock(endpoint=s.endpoint);link.is_alive.return_value=True;links.append(link);return link
+    with patch.object(m,'StateStore'),patch.object(m,'creds'),patch.object(m,'PublicColab',return_value=cl),patch.object(m.Slot,'initialize') as launch,patch.object(m.Slot,'register',return_value=state),patch.object(m,'KernelLink',side_effect=connect,create=True),patch.object(m.requests,'get',create=True) as get:
+        get.return_value.json.return_value=[{'id':'existing','execution_state':'busy'}]
+        slot=m.Slot(0);slot.cache.update(endpoint='runtimes/live',mode='quantized',born=t-300,last=t,sent=['j']);slot.persist()
+        with m.database() as c:
+            m.setup(c)
+            c.execute("insert into workers values(?,'A100',?)",(slot.device+'/gpu',t))
+            c.execute("insert into jobs(id,shots,seconds,state,route,prompt,wid,lease,deadline) values('j','[]',15,'running','continuous','t',?,'lease',?)",(slot.device+'/gpu',t+600))
+        slot.step();assert len(links)==1,'An online worker still needs its execution connection restored after controller restart'
+        slot.step();assert len(links)==1
+        links[0].is_alive.return_value=False;slot.step();assert len(links)==2;links[0].close.assert_called_once()
+        restarted=m.Slot(0);restarted.step();assert len(links)==3
+        with m.database() as c:assert c.execute("select state from jobs where id='j'").fetchone()[0]=='running'
+        launch.assert_not_called();cl.assign.assert_not_called();cl.unassign.assert_not_called()
+ print('PASS controller restart and transport loss reconnect the busy kernel without duplicate execution or allocation')
+if __name__=='__main__':connection_recovery()

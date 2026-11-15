@@ -59,9 +59,8 @@ class PublicColab:
                 raise RuntimeError('Colab allocation: '+str(err['code']))
             return self.get('runtimes/'+name)
     def unassign(self,name):
-        op=self.op(self.req('DELETE','v1beta/'+name,params={'allowMissing':'true'}))
-        if op.get('error'):raise RuntimeError('Colab release failed')
-        return op
+        # DeleteRuntime is synchronous and returns {}, unlike CreateRuntime.
+        return self.req('DELETE','v1beta/'+name,params={'allowMissing':'true'})
 
 class RuntimeFiles:
     def __init__(self,state):

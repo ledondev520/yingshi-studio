@@ -34,6 +34,7 @@ jobs:
           python3 validate_preparation.py
           python3 validate_scale.py
           python3 validate_launch.py
+          python3 validate_runtime_lifecycle.py
           python3 validate_multiuser.py
           python3 validate_worker_loop.py
           python3 validate_images.py
@@ -72,4 +73,5 @@ jobs:
           check.quota_feedback()
           check.runtime_recovery()
           check.lost_runtime_reschedules()
+          check.connection_recovery()
           PY

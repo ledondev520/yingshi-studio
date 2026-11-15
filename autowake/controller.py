@@ -5,6 +5,7 @@ from pathlib import Path
 from google.auth.transport.requests import AuthorizedSession
 from google.oauth2.credentials import Credentials
 from colab_rest import PublicColab,Capacity,PROJECT,RuntimeFiles
+from kernel_link import KernelLink
 from colab_cli.client import Variant,Accelerator
 from colab_cli.state import StateStore,SessionState
 DIR=Path(__file__).resolve().parent
@@ -85,13 +86,24 @@ class Slot:
         self.name='h3-autowake'+suffix;self.device='h3-autowake-service'+suffix
         self.path=PRIVATE/('wake'+suffix+'.json');self.identity=PRIVATE/('worker'+suffix+'.json')
         self.cache=json.loads(self.path.read_text()) if self.path.exists() else {'notebook':str(uuid.uuid4())}
-        self.cache.setdefault('mode','quantized');self.store=StateStore();self.persist()
+        self.cache.setdefault('mode','quantized');self.store=StateStore();self.link=None;self.persist()
     def persist(self):save(self.path,self.cache)
     def register(self,a):
         info=a.runtime_proxy_info;s=SessionState(name=self.name,endpoint=a.endpoint,token=info.token,url=info.url,accelerator=a.accelerator.value)
         old=self.store.get(self.name)
         if old and old.endpoint==a.endpoint:s=old
         s.token=info.token;s.url=info.url;s.token_expires_at=info.expires_at();self.store.add(s);return s
+    def connected(self,endpoint):return bool(self.link and self.link.endpoint==endpoint and self.link.is_alive())
+    def attach(self,s,kernels=None):
+        if self.connected(s.endpoint):return
+        if kernels is None:
+            fc=RuntimeFiles(s);r=requests.get(fc.url+'/api/kernels',headers=fc.headers,timeout=(5,15));r.raise_for_status();kernels=r.json()
+        kernel=next((k for k in kernels if k['id']==s.kernel_id),None)
+        if kernel is None and len(kernels)==1:kernel=kernels[0]
+        if kernel is None:raise RuntimeError('Cannot identify the worker kernel; preserving existing work')
+        if self.link:self.link.close()
+        s.kernel_id=kernel['id'];self.store.add(s)
+        self.link=KernelLink(s,kernel['id']);print(self.name,'execution connection attached',flush=True)
     def initialize(self,s):
         if not self.identity.exists():save(self.identity,{'worker_id':self.device,'worker_key':secrets.token_urlsafe(32)})
         ident=json.loads(self.identity.read_text());v=hashlib.sha256(ident['worker_key'].encode()).hexdigest()
@@ -100,7 +112,8 @@ class Slot:
         fc.upload(str(DIR/'preparation_client.py'),'h3_preparation.py')
         fc.upload(str(DIR.parent/'colab-image-worker.py' if self.cache['mode']=='image-bf16' else DIR/('cold-bf16.py' if self.cache['mode']=='bf16' else 'cold-worker.py')),'h3managedworker.py')
         response=requests.get(fc.url+'/api/kernels',headers=fc.headers,timeout=(5,15));response.raise_for_status()
-        if any(k.get('execution_state')=='busy' for k in response.json()):return
+        kernels=response.json()
+        if any(k.get('execution_state')=='busy' for k in kernels):self.attach(s,kernels);return
         with database() as c:preparation.accept(c,self.device,self.cache['mode'],dict(stage='environment',bytes_done=0,bytes_total=0,files_done=0,files_total=0,reused_bytes=0),int(time.time()),lambda *a:None)
         # Keep provisioning responsive while the actual worker occupies its kernel.
         with (PRIVATE/(self.name+'-execution.log')).open('ab') as log:
@@ -109,6 +122,7 @@ class Slot:
         except subprocess.TimeoutExpired:return
         if code:raise RuntimeError('kernel launch failed')
     def clear(self):
+        if self.link:self.link.close();self.link=None
         for k in ('endpoint','pending','sent','born','launched','last','mode','external','retry'):self.cache.pop(k,None)
         self.persist()
         if self.store.get(self.name):self.store.remove(self.name)
@@ -119,7 +133,7 @@ class Slot:
             c.execute('delete from pool_preparation where device=?',(self.device,))
             c.execute('delete from worker_drain where device=?',(self.device,))
             c.execute("delete from workers where instr(id,?||'/')=1",(self.device,))
-    def release(self,cl,endpoint):
+    def release(self,cl,endpoint,reason='idle'):
         # Only the exact endpoint returned for our persisted slot is eligible.
         assert endpoint and self.cache.get('endpoint')==endpoint
         if self.cache.get('external'):return  # User-connected runtimes remain under the user's lifecycle control.
@@ -128,11 +142,12 @@ class Slot:
             if jobs or helps:return
             c.execute('insert or ignore into worker_drain values(?)',(self.device,))
         try:
+            print(self.name,'release requested',reason,flush=True)
             cl.unassign(endpoint)
         except Exception:
             with database() as c:c.execute('delete from worker_drain where device=?',(self.device,))
             raise
-        self.clear();print(self.name,'released idle runtime',flush=True)
+        self.clear();print(self.name,'released runtime',reason,flush=True)
     def step(self):
         t=int(time.time());a=self.cache;owned=a.get('endpoint');mode=a.get('mode','quantized');wid=self.device
         with database() as c:
@@ -156,7 +171,7 @@ class Slot:
             playback=c.execute("select 1 from jobs where instr(wid,?||'/')=1 and state='done' and media_sha is null and updated>? limit 1",(wid,t-1800)).fetchone()
         if mine or helps or playback:a['last']=t;self.persist()
         unsent=[j for j in mine if j not in a.get('sent',[])]
-        if owned and live and not unsent and (mine or helps or playback or t-a.get('last',t)<IDLE):return
+        if owned and live and self.connected(owned) and not unsent and (mine or helps or playback or t-a.get('last',t)<IDLE):return
         if owned and not live and want and t-a.get('launched',0)<150:return
         auth=creds();cl=PublicColab(auth)
         ep=owned or ('runtimes/h3-'+uuid.UUID(a['notebook']).hex[:24] if a.get('pending') else None)
@@ -195,10 +210,11 @@ class Slot:
             owned=machine.endpoint;a.update(endpoint=owned,born=t,last=t,launched=0,sent=[]);self.persist()
         if not mine and not helps and not playback and ((not want and t-a.get('last',t)>=IDLE) or (not live and t-a.get('born',t)>BOOT)):
             broken=not live and t-a.get('born',t)>BOOT and bool(want)
-            self.release(cl,owned)
+            self.release(cl,owned,'startup-timeout' if not live and t-a.get('born',t)>BOOT else 'idle')
             if broken and not a.get('endpoint'):
                 with database() as c:c.execute('insert or replace into pool_retry values(?,?)',(mode,t+1800))
             return
+        if live and not self.connected(owned):self.attach(self.register(machine))
         if not live and (want or mine or helps) and time.time()-a.get('launched',0)>150:
             try:
                 self.initialize(self.register(machine))
