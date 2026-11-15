@@ -31,6 +31,7 @@ jobs:
           node --check app.js
           python3 validate_previews.py
           python3 validate_pool.py
+          python3 validate_preparation.py
           python3 validate_scale.py
           python3 validate_launch.py
           python3 validate_multiuser.py

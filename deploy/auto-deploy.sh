@@ -91,6 +91,7 @@ echo "[h3-deploy] Running pre-deploy validation checks..."
   cd "$STAGE_DIR.tmp"
   python3 validate_previews.py >/dev/null
   python3 validate_pool.py >/dev/null
+  python3 validate_preparation.py >/dev/null
   python3 validate_scale.py >/dev/null
   python3 validate_launch.py >/dev/null
   python3 validate_multiuser.py >/dev/null

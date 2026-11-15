@@ -1,3 +1,4 @@
+from h3_preparation import Preparation
 MODEL_CACHE_MANIFEST={'diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors': {'size': 20970379616, 'sha256': 'e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a'}, 'text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors': {'size': 15687142551, 'sha256': '35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6'}, 'vae/minimax_h3_audio_vae_fp32.safetensors': {'size': 605254808, 'sha256': '8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48'}, 'vae/minimax_h3_video_vae_int8_convrot.safetensors': {'size': 2811065184, 'sha256': '52a2c8c73583c86e4f41cdcce3a6ad0ea562987bc0bf3d60a0cef5f5c8e60c0e'}}
 """Restore a pinned model from the private cache; incomplete files never replace models."""
 def restore_cached_model(path, name, base, worker_key, worker_id, gpu):
@@ -256,15 +257,17 @@ mounted=Path('/content/drive/MyDrive/MiniMax-H3/models')
 if mounted.is_dir():models=mounted
 for d in (models,videos):d.mkdir(parents=True,exist_ok=True)
 PRECISION=globals().get('H3_STUDIO_MODEL','quantized')
+_preparation=Preparation(BASE,config,PRECISION,gpu_present)
 if PRECISION not in ('quantized','bf16'):raise ValueError('未知执行端类型')
 if globals().get('_h3_worker') and _h3_worker.is_alive():
     raise RuntimeError('此会话已有执行端，请使用独立运行时。')
 if PRECISION=='bf16':
     import h3_bf16
-    bf16_runtime=h3_bf16.prepare()
+    bf16_runtime=h3_bf16.prepare(_preparation)
 else:
     from huggingface_hub import hf_hub_download
     files = {'diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors': 20970379616, 'text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors': 15687142551, 'vae/minimax_h3_audio_vae_fp32.safetensors': 605254808, 'vae/minimax_h3_video_vae_int8_convrot.safetensors': 2811065184}
+    _preparation.weights(models,files)
     def prepare_model(pair):
         name, size = pair
         path = models / name
@@ -281,6 +284,7 @@ else:
     with ThreadPoolExecutor(2) as downloads:
         list(downloads.map(prepare_model, files.items()))
     print('四个文件已就绪')
+    _preparation.stage('environment')
     import time, requests
     repo = Path('/content/MiniMax-H3-ComfyUI')
     base='http://127.0.0.1:8192'
@@ -310,6 +314,7 @@ else:
         time.sleep(1)
     else: raise RuntimeError('服务尚未就绪，请查看 '+str(log))
     print('准备完成')
+    _preparation.stage('ready')
     graph={'92': {'inputs': {'filename_prefix': 'video/MiniMax_H3', 'format': 'mp4', 'codec': 'h264', 'video': ['140:130', 0]}, 'class_type': 'SaveVideo', '_meta': {'title': 'Save Video'}}, '140:119': {'inputs': {'vae_name': 'minimax_h3_video_vae_int8_convrot.safetensors'}, 'class_type': 'VAELoader', '_meta': {'title': 'Load VAE'}}, '140:120': {'inputs': {'vae_name': 'minimax_h3_audio_vae_fp32.safetensors'}, 'class_type': 'VAELoader', '_meta': {'title': 'Load VAE'}}, '140:121': {'inputs': {'samples': ['140:125', 0], 'vae': ['140:120', 0]}, 'class_type': 'VAEDecodeAudio', '_meta': {'title': 'VAE Decode Audio'}}, '140:122': {'inputs': {'samples': ['140:125', 0], 'vae': ['140:119', 0]}, 'class_type': 'VAEDecode', '_meta': {'title': 'VAE Decode'}}, '140:123': {'inputs': {'sampler_name': 'res_multistep'}, 'class_type': 'KSamplerSelect', '_meta': {'title': 'KSamplerSelect'}}, '140:124': {'inputs': {'scheduler': 'simple', 'steps': 20, 'denoise': 1, 'model': ['140:127', 0]}, 'class_type': 'BasicScheduler', '_meta': {'title': 'BasicScheduler'}}, '140:125': {'inputs': {'noise': ['140:129', 0], 'guider': ['140:126', 0], 'sampler': ['140:123', 0], 'sigmas': ['140:124', 0], 'latent_image': ['140:131', 1]}, 'class_type': 'SamplerCustomAdvanced', '_meta': {'title': 'SamplerCustomAdvanced'}}, '140:126': {'inputs': {'model': ['140:127', 0], 'conditioning': ['140:131', 0]}, 'class_type': 'BasicGuider', '_meta': {'title': 'Basic Guider'}}, '140:127': {'inputs': {'unet_name': 'minimax_h3_fl2va_pruned_int8_convrot.safetensors', 'weight_dtype': 'default'}, 'class_type': 'UNETLoader', '_meta': {'title': 'Load Diffusion Model'}}, '140:128': {'inputs': {'clip_name': 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors', 'type': 'minimax', 'device': 'default'}, 'class_type': 'CLIPLoader', '_meta': {'title': 'Load CLIP'}}, '140:129': {'inputs': {'noise_seed': 757358688076805}, 'class_type': 'RandomNoise', '_meta': {'title': 'RandomNoise'}}, '140:130': {'inputs': {'fps': 24, 'bit_depth': 8, 'color_space': 'sRGB', 'codec': 'none', 'images': ['140:122', 0], 'audio': ['140:121', 0]}, 'class_type': 'CreateVideo', '_meta': {'title': 'Create Video'}}, '140:131': {'inputs': {'prompt': '', 'width': 768, 'height': 448, 'length': 73, 'clip': ['140:128', 0], 'vae': ['140:119', 0]}, 'class_type': 'MiniMaxH3ImageToVideo', '_meta': {'title': 'MiniMax H3 Image to Video'}}}
 # 雨落，火开｜三个连续镜头，24 fps，成片 30 秒
 
@@ -431,6 +436,7 @@ def _render_piece(job,ix,path,piece,previous,update):
     if PRECISION=='bf16':
         seed=int.from_bytes(hashlib.sha256((ident+str(ix)).encode()).digest()[:6],'big')
         return h3_bf16.render(bf16_runtime,job,ix,piece,previous,update,(width,height),seed)
+    _preparation.stage('loading')
     g=copy.deepcopy(graph);fr=5+17*max(0,math.ceil((d*24-5)/17))
     g['140:131']['inputs'].update(prompt=s.get('h3_prompt') or (str(job['prompt'])+'。本镜头：'+str(s['prompt'])),length=fr,width=width,height=height)
     g['140:129']['inputs']['noise_seed']=int.from_bytes(hashlib.sha256((ident+str(ix)).encode()).digest()[:6],'big')
@@ -472,7 +478,7 @@ def _render_piece(job,ix,path,piece,previous,update):
         time.sleep(4)
     if state.get('status',{}).get('status_str')=='error':raise RuntimeError('H3 生成失败，请查看运行时日志')
     file=next(m for arr in state['outputs']['92'].values() if isinstance(arr,list) for m in arr if isinstance(m,dict) and m.get('filename','').endswith('.mp4'))
-    temp=piece.with_suffix('.part');shutil.copyfile(repo/'output'/file.get('subfolder','')/file['filename'],temp);temp.replace(piece)
+    temp=piece.with_suffix('.part');shutil.copyfile(repo/'output'/file.get('subfolder','')/file['filename'],temp);temp.replace(piece);_preparation.stage('ready')
 
 def relay_headers():
     return {'Authorization':'Bearer '+token,'X-H3-Worker-ID':worker_id,'X-H3-GPU':gpu_name,'X-H3-Runtime':runtime_id}
@@ -679,7 +685,7 @@ def h3_sampling_loop(send,active_dir,base):
                 queue=requests.get(base+'/queue',timeout=4).json()
                 v=h3_sampling_snapshot(queue,active_dir,'/content/minimax-h3-comfy.log')
                 if v and (v!=last or time.monotonic()-sent>28):
-                    send('/api/worker/sampler',v);last=v;sent=time.monotonic()
+                    send('/api/worker/sampler',v);_preparation.stage('ready');last=v;sent=time.monotonic()
             except Exception:pass  # telemetry must never affect rendering
             time.sleep(6)
 

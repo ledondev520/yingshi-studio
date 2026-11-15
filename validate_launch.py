@@ -1,5 +1,5 @@
 """The launcher must stay active for the lifetime of real GPU work."""
-import tempfile,time,runpy,builtins,subprocess
+import tempfile,time,runpy,builtins,subprocess,types
 from pathlib import Path
 from unittest.mock import patch
 
@@ -18,5 +18,12 @@ def run():
   elapsed=time.monotonic()-start
   for child in children:child.wait(timeout=2)
   assert elapsed>=.3,'Launcher returned while GPU work still ran; kernel becomes idle'
+  worker.write_text("raise RuntimeError('startup failed')\n");closed=[]
+  progress=types.SimpleNamespace(close_all=lambda failed:closed.append(failed))
+  with patch.dict('sys.modules',{'h3_preparation':progress}),patch('pathlib.Path.cwd',return_value=Path(tmp)),patch('pathlib.Path.is_file',exists),patch('builtins.open',local_open):
+   try:runpy.run_path(str(Path(__file__).parent/'autowake'/'launch.py'),run_name='__main__')
+   except RuntimeError:pass
+   else:raise AssertionError('Startup failure was swallowed')
+  assert closed==[True],'Failed startup must stop preparation telemetry'
  print('PASS kernel execution lasts for actual work')
 if __name__=='__main__':run()

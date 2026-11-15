@@ -20,7 +20,7 @@ function workerLabel(w){
  const loading=Number(w?.loading_count)||0,requesting=Number(w?.requesting_count)||0;
  const parts=[];
  if(w?.online||n>0)parts.push(n>1?`● ${n} 张云端 GPU 在线`:'● 云端 GPU 在线');
- if(loading)parts.push(`${loading} 张 GPU 已分配，准备模型中`);
+ if(loading)parts.push(`${loading} 张 GPU 已分配`);
  if(requesting)parts.push(`正在申请 ${requesting} 张 GPU`);
  if(run)parts.push(`${run} 个生成中`);
  if(recovering)parts.push(`${recovering} 个自动恢复中`);
@@ -76,6 +76,23 @@ function jobMessage(j){return j.kind==='image'?({planning:'正在创作',queued:
 function detailDate(ts){return new Intl.DateTimeFormat('zh-CN',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'Asia/Shanghai'}).format(new Date(ts*1000))}
 let serverClockOffset=0;
 function ageLabel(n){n=Math.max(0,Math.floor(n));return n<60?n+' 秒':Math.floor(n/60)+' 分 '+(n%60)+' 秒'}
+function preparationDetail(list,container){
+ const labels={environment:'启动环境',download:'下载权重',copying:'传入本机缓存',cache:'复用本机权重',loading:'加载模型',failed:'准备失败，等待自动重试'};
+ const gb=n=>(n/1e9).toFixed(1)+' GB',now=Math.floor(Date.now()/1000)+serverClockOffset;
+ for(const p of list||[]){
+  const kind=p.mode==='image-bf16'?'图片':p.mode==='bf16'?'视频 · 原始 BF16':'视频 · 量化版';
+  const box=tx('div','','sampler preparation'),title=kind+' GPU · '+(labels[p.stage]||'等待执行端回报');
+  box.append(tx('b',title));
+  if(p.bytes_total>0){
+   const bar=document.createElement('progress');bar.max=p.bytes_total;bar.value=p.bytes_done;bar.setAttribute('aria-label',title+'，按完整文件统计');
+   box.append(bar,tx('small','权重已就绪 '+gb(p.bytes_done)+' / '+gb(p.bytes_total)+' · '+p.files_done+' / '+p.files_total+' 个文件'));
+   if(p.reused_bytes>0)box.append(tx('small','其中 '+gb(p.reused_bytes)+' 已复用本机缓存'));
+   box.append(tx('small','按完整文件更新，不含尚未完成的文件'));
+  }else box.append(tx('small',p.stage==='failed'?'任务已保留，后台会重新尝试。':p.stage==='loading'?'正在将模型载入内存和显存，完成后自动生成。':'正在安装依赖或启动执行环境，完成后自动进入下一阶段。'));
+  box.append(tx('small',(p.stale?'准备进度回报已中断，以上为最后一次实测 · ':'最近回报：')+ageLabel(now-p.seen)+'前'));
+  container.append(box);
+ }
+}
 function runningDetail(j,mid){
  const now=Math.floor(Date.now()/1000)+serverClockOffset,age=Math.max(0,now-j.updated);
  const samples=j.sampling||[],m=/^生成第 (\d+)\/(\d+) 镜$/.exec(j.message||'');
@@ -98,6 +115,7 @@ function renderJobs(){
   const row=tx('div','','job'),left=tx('span',j.recovering?'自动恢复':states[j.state]||j.state,'pill'),mid=tx('div',''),right=tx('div','');
   const title=(j.parent?'↳ ':'')+(j.brief||j.prompt);mid.append(tx('strong',title.length>90?title.slice(0,90)+'…':title));
   mid.append(tx('small',(j.kind==='image'?[detailDate(j.created),{landscape:'横图',portrait:'竖图',square:'方幅'}[j.aspect],jobMessage(j)]:[detailDate(j.created),modeLabel(j.precision),(j.total_seconds||j.seconds)+' 秒',j.quality==='hd'?'高清 768p':j.quality==='fast'?'快速预览':'',j.shots.length?j.shots.length+' 镜':(j.state==='failed'?'未出分镜':''),j.message]).filter(Boolean).join(' · ')));
+  preparationDetail(j.preparation,mid);
   if(j.state==='running')runningDetail(j,mid);
   if(j.state==='done'&&j.media_ready){const pb=tx('button',j.kind==='image'?'查看图片':j.preview_status==='ready'?'播放预览':'查看成片');pb.onclick=()=>openPreview(j);right.append(pb);
    if(j.kind!=='image'){const f=tx('button','接着续拍');f.onclick=()=>{if($('prompt').value.trim()&&$('prompt').value!==j.brief&&!confirm('从这条成片的结尾续拍？'))return;watchToken++;creationKind='video';modelMode=j.precision==='bf16'?'bf16':'quantized';paintMode();parentId=j.id;$('prompt').value='';shots=[];paintReply();changed();renderShots();$('workMsg').textContent='写下接下来发生什么，所选时长是新增长度。';$('prompt').focus()};right.append(f)}
@@ -123,7 +141,7 @@ async function recoverGuestJobs(current){
  return merged;
 }
 async function refresh(first=false){
- try{const d=await api('state'),prev=role;if(Number.isFinite(d.now))serverClockOffset=d.now-Math.floor(Date.now()/1000);showRole(d.role||'guest');const owner=role==='owner';rememberJobs(d.jobs||[]);jobs=owner?(d.jobs||[]):await recoverGuestJobs(d.jobs||[]);rememberJobs(jobs);const w=d.worker||{};onlineModes=d.online_modes||null;paintMode();$('gpu').textContent=w.online?w.gpu:(w.loading_count?'云端 GPU 准备中':w.requesting_count?'正在申请云端 GPU':w.runtime_limit?'等待 GPU 名额':'云端 GPU 待机');$('workerSeen').textContent=workerLabel(w);if(first||prev!==role){const local=localRead('draft',null),draft=owner?(d.draft||(local?{...local,parent:''}:null)):local;paintPrompt(draft);$('draftStatus').textContent=draft?'草稿已恢复':'自动保存草稿';if(owner&&!d.draft&&draft)changed();const current=jobs.find(j=>['planning','queued','running'].includes(j.state));if(current)watchJob(current)}renderJobs();if(previewJob){const current=jobs.find(j=>j.id===previewJob);if(current)renderPreview(current)}if(first)$('submit').disabled=false}catch(e){$('workerSeen').textContent='网络中断，正在重试'}
+ try{const d=await api('state'),prev=role;if(Number.isFinite(d.now))serverClockOffset=d.now-Math.floor(Date.now()/1000);showRole(d.role||'guest');const owner=role==='owner';rememberJobs(d.jobs||[]);jobs=owner?(d.jobs||[]):await recoverGuestJobs(d.jobs||[]);rememberJobs(jobs);const w=d.worker||{};onlineModes=d.online_modes||null;paintMode();$('gpu').textContent=w.online?w.gpu:(w.loading_count?'云端 GPU 准备中':w.requesting_count?'正在申请云端 GPU':w.runtime_limit?'等待 GPU 名额':'云端 GPU 待机');$('workerSeen').textContent=workerLabel(w);$('preparation').replaceChildren();preparationDetail(w.preparation,$('preparation'));$('preparation').hidden=!w.preparation?.length;if(first||prev!==role){const local=localRead('draft',null),draft=owner?(d.draft||(local?{...local,parent:''}:null)):local;paintPrompt(draft);$('draftStatus').textContent=draft?'草稿已恢复':'自动保存草稿';if(owner&&!d.draft&&draft)changed();const current=jobs.find(j=>['planning','queued','running'].includes(j.state));if(current)watchJob(current)}renderJobs();if(previewJob){const current=jobs.find(j=>j.id===previewJob);if(current)renderPreview(current)}if(first)$('submit').disabled=false}catch(e){$('workerSeen').textContent='网络中断，正在重试'}
 }
 function newInput(){++watchToken;activeJob='';shots=[];$('workMsg').textContent='';renderShots();changed()}
 $('prompt').oninput=newInput;
