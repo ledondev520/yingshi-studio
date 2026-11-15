@@ -23,7 +23,7 @@ def submitted(gpu,quality):
 
 def run():
     baseline=submitted('NVIDIA RTX PRO 6000 Blackwell Server Edition','hd')
-    for gpu in ('NVIDIA A100-SXM4-40GB','NVIDIA A100-SXM4-80GB'):
+    for gpu in ('NVIDIA A100-SXM4-80GB',):
         g=submitted(gpu,'hd');backend=g['attention']
         assert backend=={'class_type':'ModelAttentionBackend','inputs':{'model':['140:127',0],'attention':'comfy kitchen attention'}}
         assert g['140:124']['inputs']['model']==g['140:126']['inputs']['model']==['attention',0]
@@ -31,11 +31,11 @@ def run():
         del g['attention']
         for n in ('140:124','140:126'):g[n]['inputs']['model']=['140:127',0]
         assert g==baseline
-    for gpu in ('NVIDIA A100-SXM4-80GB','NVIDIA H100 80GB HBM3','NVIDIA RTX PRO 6000 Blackwell Server Edition'):
+    for gpu in ('NVIDIA A100-SXM4-40GB','NVIDIA A100-SXM4-80GB','NVIDIA H100 80GB HBM3','NVIDIA RTX PRO 6000 Blackwell Server Edition'):
         for quality in ('fast','standard','hd'):
             g=submitted(gpu,quality)
-            if 'A100' not in gpu or quality!='hd':assert 'attention' not in g
+            if 'A100' not in gpu or '80GB' not in gpu or quality!='hd':assert 'attention' not in g
             if quality=='fast':assert g['140:124']['inputs']['steps']==8 and g['140:126']['inputs']['model']==['turbo',0]
-    print('PASS A100 HD attention routing, unchanged seed/geometry/20 steps, G4/H100 and Turbo isolation')
+    print('PASS A100 80GB HD attention routing, unchanged seed/geometry/20 steps, A100 40GB/G4/H100 and Turbo isolation')
 
 if __name__=='__main__':run()
