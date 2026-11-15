@@ -79,6 +79,7 @@ class Slot:
         if self.store.get(self.name):self.store.remove(self.name)
         with database() as c:
             c.execute('delete from pool_boots where device=?',(self.device,))
+            c.execute('delete from pool_signal where device=?',(self.device,))
             c.execute('delete from worker_drain where device=?',(self.device,))
             c.execute("delete from workers where instr(id,?||'/')=1",(self.device,))
     def release(self,cl,endpoint):
@@ -105,12 +106,16 @@ class Slot:
             mine,helps=working(c,wid,t)
             want=choose(c,wid,t,mode if owned or a.get('pending') else None)
             if not TOKEN.exists():return
+            if live:
+                c.execute('delete from pool_signal where device=?',(wid,))
+                c.execute('delete from pool_boots where device=?',(wid,))
+            elif not want:
+                c.execute("delete from pool_signal where device=? and stage!='denied'",(wid,))
+                c.execute('delete from pool_boots where device=?',(wid,))
             if not owned and not a.get('pending') and (not want or a.get('retry',0)>t):return
-            if live or not want:c.execute("delete from pool_signal where device=? and stage!='denied'",(wid,))
             if not live and want:
                 c.execute('insert or replace into pool_signal values(?,?,?,?)',(wid,want,'loading' if owned else 'request',t+600))
                 c.execute('insert or replace into pool_boots values(?,?,?)',(wid,want,t+600))
-            elif live or not want:c.execute('delete from pool_boots where device=?',(wid,))
             playback=c.execute("select 1 from jobs where instr(wid,?||'/')=1 and state='done' and media_sha is null and updated>? limit 1",(wid,t-1800)).fetchone()
         if mine or helps or playback:a['last']=t;self.persist()
         unsent=[j for j in mine if j not in a.get('sent',[])]
@@ -154,7 +159,11 @@ class Slot:
                 with database() as c:c.execute('insert or replace into pool_retry values(?,?)',(mode,t+1800))
             return
         if not live and want and time.time()-a.get('launched',0)>150:
-            a['launched']=time.time();self.persist();self.initialize(self.register(machine))
+            try:
+                self.initialize(self.register(machine))
+                a['launched']=time.time();self.persist()
+            except Exception:
+                a['launched']=time.time()-105;self.persist();raise
         if unsent:
             s=self.register(machine)
             for job in unsent:

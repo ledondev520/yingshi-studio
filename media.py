@@ -88,9 +88,9 @@ def put(h,jid,data,db,worker,fail):
   if tmp:tmp.unlink(missing_ok=True)
   SLOTS.release()
 
-def serve(h,jid,data,db,fail):
+def serve(h,jid,data,db,fail,watch_ok=False):
  with db() as c:
-  visitor=h.visitor(c)
+  visitor=None if watch_ok else h.visitor(c)
   r=c.execute('SELECT * FROM jobs WHERE id=?',(jid,)).fetchone()
   if not r or (visitor and r['visitor']!=visitor) or not driveid(r) or not ready(data,r):fail(404,'此成片尚未同步站内预览')
   etag='"'+r['media_sha']+'"'
