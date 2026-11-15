@@ -5,7 +5,20 @@ from urllib.parse import quote
 from datetime import datetime
 from types import SimpleNamespace as NS
 HOST='https://colaboratory.googleapis.com/'
-PROJECT='YOUR_GOOGLE_CLOUD_PROJECT'
+def _resolve_project(default='YOUR_GOOGLE_CLOUD_PROJECT'):
+    import json,os
+    for v in (os.environ.get('H3_COLAB_PROJECT'),os.environ.get('H3_GCP_PROJECT'),os.environ.get('GOOGLE_CLOUD_PROJECT')):
+        if v and v.strip() and v.strip()!=default:return v.strip()
+    for p in (Path('/etc/h3-studio/colab-project'),Path.home()/'.config/colab-cli/colab-project',Path('/etc/h3-studio/gcp-project'),Path.home()/'.config/colab-cli/gcp-project'):
+        try:
+            if p.is_file() and (t:=p.read_text().strip()) and t!=default:return t
+        except OSError:pass
+    try:
+        tp=Path.home()/'.config/colab-cli/token.json'
+        if tp.is_file() and (qp:=json.loads(tp.read_text()).get('quota_project_id')) and qp.strip():return qp.strip()
+    except Exception:pass
+    return default
+PROJECT=_resolve_project()
 class Capacity(Exception):pass
 def wrap(x):
     info=x.get('connectionInfo') or {};expiry=info.get('expireTime')

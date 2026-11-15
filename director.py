@@ -6,8 +6,21 @@ import threading
 import urllib.error
 import urllib.request
 
+import os
+from pathlib import Path
+
 MODEL = 'gemini-4-argon'
 PROJECT = 'YOUR_GOOGLE_CLOUD_PROJECT'
+def _resolve_project(keys=None):
+    for v in (os.environ.get('H3_GCP_PROJECT'), os.environ.get('GOOGLE_CLOUD_PROJECT')):
+        if v and v.strip() and v.strip() != 'YOUR_GOOGLE_CLOUD_PROJECT': return v.strip()
+    for d in ([Path(keys)] if keys else []) + [Path('/etc/h3-studio')]:
+        try:
+            p = d / 'gcp-project'
+            if p.is_file() and (t := p.read_text().strip()) and t != 'YOUR_GOOGLE_CLOUD_PROJECT': return t
+        except OSError: pass
+    return PROJECT
+PROJECT = _resolve_project()
 URL = f'https://aiplatform.googleapis.com/v1/projects/{PROJECT}/locations/global/publishers/google/models/{MODEL}:generateContent'
 _gate = threading.BoundedSemaphore(1)
 ROUTES = {'continuous':'连续长镜头，不切镜；多段时保持末帧动作连贯', 'story':'叙事', 'mood':'氛围', 'dialogue':'对白'}
@@ -89,12 +102,14 @@ def plan(d, keys, fail, emit=None):
             sec,sep,txt=line.partition('|')
             if sep and sec.strip().isascii() and sec.strip().isdigit() and 1<=int(sec.strip())<=15 and txt.strip():shots.append(txt.split('|||',1)[0].removeprefix('[CUT]').strip().rstrip('|')[:2000])
         if shots and emit:emit(shots)
+    proj=_resolve_project(keys)
+    endpoint=f'https://aiplatform.googleapis.com/v1/projects/{proj}/locations/global/publishers/google/models/{MODEL}:generateContent' if proj!=PROJECT else URL
     if not _gate.acquire(blocking=False):fail(429,'正在编写另一份分镜，请稍后重试。')
     try:
         for attempt in range(2):
             for retry in range(3):
                 try:
-                    raw=generate(URL,keys/'vertex-api-key',body,partial if emit else None)
+                    raw=generate(endpoint,keys/'vertex-api-key',body,partial if emit else None)
                     break
                 except urllib.error.HTTPError as e:
                     if e.code in (429,503) and retry<2:
