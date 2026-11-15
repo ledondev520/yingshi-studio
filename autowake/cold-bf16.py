@@ -458,6 +458,10 @@ def _render_piece(job,ix,path,piece,previous,update):
         g['turbo']={'class_type':'LoraLoaderModelOnly','inputs':{'model':['140:127',0],'strength_model':1.0,'lora_name':fname}}
         g['140:124']['inputs'].update(model=['turbo',0],steps=8)
         g['140:126']['inputs']['model']=['turbo',0]
+    if 'A100' in gpu_name and job.get('quality')=='hd':
+        # Keep the measured attention change on the video model; text and VAE retain their backends.
+        g['attention']={'class_type':'ModelAttentionBackend','inputs':{'model':['140:127',0],'attention':'comfy kitchen attention'}}
+        for node in ('140:124','140:126'):g[node]['inputs']['model']=['attention',0]
     if previous is not None:
         im='studio-'+path.name+'-'+str(ix)+'.png'
         if previous.suffix=='.png':shutil.copyfile(previous,repo/'input'/im)
