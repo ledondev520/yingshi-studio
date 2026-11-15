@@ -474,7 +474,10 @@ def render_assist(task):
             with piece.open('rb') as f:
                 r=requests.put(BASE+'/api/worker/media/shot/'+ticket,data=f,headers={**relay_headers(),'Content-Type':'video/mp4','X-Content-SHA256':file_digest(piece)},timeout=(8,60),allow_redirects=False);r.raise_for_status()
         rpc('/api/worker/shot/ready',{**args,'size':piece.stat().st_size})
-        if task.get('relay'):piece.unlink(missing_ok=True)
+        if task.get('relay'):
+            piece.unlink(missing_ok=True);piece.with_suffix('.queue.json').unlink(missing_ok=True)
+            try:path.rmdir()
+            except OSError:pass
     except Exception as exc:
         if transient_error(exc):raise
         try:rpc('/api/worker/shot/release',args)
@@ -482,20 +485,24 @@ def render_assist(task):
         raise
 
 def render_job(job):
+    import shutil as _shutil
     ident=str(job['id']); lease=job['lease_token']
     shots=job['shots']
     if not 1<=len(shots)<=12:raise ValueError('无效分镜数')
     durations=[float(s['seconds']) for s in shots]
     if any(not (0.5<=d<=15) for d in durations) or abs(sum(durations)-float(job['seconds']))>0.1:raise ValueError('分镜时长无效')
-    path=ACTIVE_DIR/hashlib.sha256(ident.encode()).hexdigest()[:24];path.mkdir(exist_ok=True)
-    final=videos/('studio-'+path.name+'.mp4'); manifest=path/'result.json'
+    path=ACTIVE_DIR/hashlib.sha256(ident.encode()).hexdigest()[:24]
+    final=videos/('studio-'+path.name+'.mp4')
+    def _cleanup_scratch():
+        if path.is_dir() and final.parent.resolve()!=path.resolve():_shutil.rmtree(path,ignore_errors=True)
     def update(state,progress,message,url=None):
         body={'id':ident,'lease_token':lease,'state':state,'progress':progress,'message':message}
         if url:body['result_url']=url
         return rpc('/api/worker/update',body)
     update('running',1,'正在准备 GPU')
     if final.is_file() and final.stat().st_size>0:
-        url=drive_result(final,ident);update('done',100,'已从 Drive 恢复成片',url);return
+        url=drive_result(final,ident);update('done',100,'已从 Drive 恢复成片',url);_cleanup_scratch();return
+    path.mkdir(exist_ok=True)
     src,last=source_for(job,path) if job.get('append_source') else (None,None)
     pieces=[path/f'{i:02d}.mp4' for i in range(len(shots))]
     pending=restore_pieces(job,pieces,update)
@@ -544,9 +551,10 @@ def render_job(job):
     if src:
         joined=path/'joined.tmp.mp4';append_video(src,tmp,joined,job['original_geometry']);joined.replace(final)
     else:tmp.replace(final)
-    url=drive_result(final,ident);durable(manifest,{'job':ident,'url':url,'seconds':sum(durations),'width':width,'height':height,'music_continuous':music_ok})
+    url=drive_result(final,ident)
     note='配乐连续' if music_ok else ('保留原声（首段音乐不足）' if use_music and len(pieces)>1 else '原声')
     update('done',100,f'已保存 · {width}×{height} · '+note,url)
+    _cleanup_scratch()
 def worker_loop():
     resume_lease='';assist=None
     while True:
