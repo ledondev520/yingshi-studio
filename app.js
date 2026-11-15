@@ -17,14 +17,16 @@ function jobToken(id){return localRead('tokens',[]).find(x=>x?.id===id)?.token||
 function forgetJobToken(id){localWrite('tokens',localRead('tokens',[]).filter(x=>x?.id&&x.id!==id))}
 function workerLabel(w){
  const n=Number(w?.online_count)||0,run=Number(w?.running_jobs)||0,q=Number(w?.queued_jobs)||0;
- if(w?.online||n>0){
-  const parts=[n>1?`● ${n} 张云端 GPU 在线`:'● 云端 GPU 在线'];
-  if(run)parts.push(`${run} 个生成中`);
-  if(q)parts.push(`${q} 个排队`);
-  if(!run&&!q)parts.push('空闲可接单');
-  return parts.join(' · ');
- }
- return q?`${q} 个任务排队 · 后台正在申请 GPU`:'有任务时后台按需申请 GPU';
+ const loading=Number(w?.loading_count)||0,requesting=Number(w?.requesting_count)||0;
+ const parts=[];
+ if(w?.online||n>0)parts.push(n>1?`● ${n} 张云端 GPU 在线`:'● 云端 GPU 在线');
+ if(loading)parts.push(`${loading} 张 GPU 已分配，准备模型中`);
+ if(requesting)parts.push(`正在申请 ${requesting} 张 GPU`);
+ if(run)parts.push(`${run} 个生成中`);
+ if(q)parts.push(`${q} 个排队`);
+ if(w?.runtime_limit)parts.push('Google 活动运行时已达上限，等待空闲卡');
+ if(!run&&!q&&(w?.online||n>0))parts.push('空闲可接单');
+ return parts.join(' · ')||'有任务时后台按需申请 GPU';
 }
 function showRole(value){role=value;logged=true;}
 let activeJob='',watchToken=0;
@@ -118,7 +120,7 @@ async function recoverGuestJobs(current){
  return merged;
 }
 async function refresh(first=false){
- try{const d=await api('state'),prev=role;if(Number.isFinite(d.now))serverClockOffset=d.now-Math.floor(Date.now()/1000);showRole(d.role||'guest');const owner=role==='owner';rememberJobs(d.jobs||[]);jobs=owner?(d.jobs||[]):await recoverGuestJobs(d.jobs||[]);rememberJobs(jobs);const w=d.worker||{};onlineModes=d.online_modes||null;paintMode();$('gpu').textContent=w.online?w.gpu:'云端 GPU 离线';$('workerSeen').textContent=workerLabel(w);if(first||prev!==role){const local=localRead('draft',null),draft=owner?(d.draft||(local?{...local,parent:''}:null)):local;paintPrompt(draft);$('draftStatus').textContent=draft?'草稿已恢复':'自动保存草稿';if(owner&&!d.draft&&draft)changed();const current=jobs.find(j=>['planning','queued','running'].includes(j.state));if(current)watchJob(current)}renderJobs();if(previewJob){const current=jobs.find(j=>j.id===previewJob);if(current)renderPreview(current)}if(first)$('submit').disabled=false}catch(e){$('workerSeen').textContent='网络中断，正在重试'}
+ try{const d=await api('state'),prev=role;if(Number.isFinite(d.now))serverClockOffset=d.now-Math.floor(Date.now()/1000);showRole(d.role||'guest');const owner=role==='owner';rememberJobs(d.jobs||[]);jobs=owner?(d.jobs||[]):await recoverGuestJobs(d.jobs||[]);rememberJobs(jobs);const w=d.worker||{};onlineModes=d.online_modes||null;paintMode();$('gpu').textContent=w.online?w.gpu:(w.loading_count?'云端 GPU 准备中':w.requesting_count?'正在申请云端 GPU':w.runtime_limit?'等待 GPU 名额':'云端 GPU 待机');$('workerSeen').textContent=workerLabel(w);if(first||prev!==role){const local=localRead('draft',null),draft=owner?(d.draft||(local?{...local,parent:''}:null)):local;paintPrompt(draft);$('draftStatus').textContent=draft?'草稿已恢复':'自动保存草稿';if(owner&&!d.draft&&draft)changed();const current=jobs.find(j=>['planning','queued','running'].includes(j.state));if(current)watchJob(current)}renderJobs();if(previewJob){const current=jobs.find(j=>j.id===previewJob);if(current)renderPreview(current)}if(first)$('submit').disabled=false}catch(e){$('workerSeen').textContent='网络中断，正在重试'}
 }
 function newInput(){++watchToken;activeJob='';shots=[];$('workMsg').textContent='';renderShots();changed()}
 $('prompt').oninput=newInput;

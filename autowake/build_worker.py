@@ -2,6 +2,9 @@
 from pathlib import Path
 import sys
 def build(s):
+    import json
+    cache=json.loads(Path(__file__).resolve().parents[1].joinpath('model-cache-manifest.json').read_text())
+    helper=Path(__file__).with_name('cache_client.py').read_text()
     a=s.index('from google.colab import drive');b=s.index('PRECISION=globals()',a) if 'PRECISION=globals()' in s[a:] else s.index('from huggingface_hub import hf_hub_download',a)
     s=s[:a]+'''import fcntl
 _managed_lock=open('/content/h3-managed.lock','a')
@@ -39,7 +42,15 @@ for d in (models,videos):d.mkdir(parents=True,exist_ok=True)
     assert s.count('drive_result(final)')==2
     s=s.replace('drive_result(final)','drive_result(final,ident)')
 
-    return s+'\n_h3_worker.join()\n'
+    download="        hf_hub_download(repo_id='Comfy-Org/MiniMax-H3'"
+    # shortcut: only pinned quantized video weights are cached; add a BF16 manifest before caching BF16.
+    assert s.count(download)==1
+    s=s.replace(download,"        if not restore_cached_model(path, name, BASE, token, did, gpu_present):\n    "+download)
+    assert s.count('    for name, size in files.items():')==1
+    s=s.replace('    for name, size in files.items():','    def prepare_model(pair):\n        name, size = pair')
+    s=s.replace("            print('复用：', name)\n            continue","            print('复用：', name)\n            return")
+    s=s.replace("    print('四个文件已就绪')","    from concurrent.futures import ThreadPoolExecutor\n    with ThreadPoolExecutor(2) as downloads:\n        list(downloads.map(prepare_model, files.items()))\n    print('四个文件已就绪')")
+    return 'MODEL_CACHE_MANIFEST='+repr(cache)+'\n'+helper+'\n'+s+'\n_h3_worker.join()\n'
 if __name__=='__main__':
     import ast
     source=Path(sys.argv[1]).read_text();out=build(source)

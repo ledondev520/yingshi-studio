@@ -143,7 +143,7 @@ class Slot:
                 c.execute('delete from pool_signal where device=?',(wid,))
                 c.execute('delete from pool_boots where device=?',(wid,))
             elif not want:
-                c.execute("delete from pool_signal where device=? and stage!='denied'",(wid,))
+                c.execute("delete from pool_signal where device=? and stage NOT IN ('denied','limit')",(wid,))
                 c.execute('delete from pool_boots where device=?',(wid,))
             if not owned and not a.get('pending') and (not want or a.get('retry',0)>t):return
             if not live and want:
@@ -170,18 +170,20 @@ class Slot:
         if not machine:
             if not want:return
             mode=want;a.update(mode=mode,pending=t,retry=t+300);self.persist()
+            limited=False
             try:
-                models=(Accelerator.A100,Accelerator.H100) if mode=='image-bf16' else (Accelerator.A100,Accelerator.H100,Accelerator.G4)
+                models=(Accelerator.A100,Accelerator.H100) if mode=='image-bf16' else (Accelerator.A100,Accelerator.G4,Accelerator.H100)
                 for model in models:
                     try:machine=cl.assign(uuid.UUID(a['notebook']),Variant.GPU,model,highmem=(mode in ('bf16','image-bf16')));break
-                    except Capacity:
+                    except Capacity as exc:
+                        limited=limited or str(exc)=='TOO_MANY_ACTIVE_RUNTIMES'
                         if model==models[-1]:raise
             except Capacity:
                 a.pop('pending',None);self.persist()
                 with database() as c:
                     c.execute('delete from pool_boots where device=?',(wid,))
                     c.execute('insert or replace into pool_retry values(?,?)',(mode,int(time.time())+300))
-                    c.execute('insert or replace into pool_signal values(?,?,?,?)',(wid,mode,'denied',int(time.time())+300))
+                    c.execute('insert or replace into pool_signal values(?,?,?,?)',(wid,mode,'limit' if limited else 'denied',int(time.time())+300))
                 print(self.name,mode,'capacity refused; existing workers continue',flush=True);return
             with database() as c:c.execute('insert or replace into pool_signal values(?,?,?,?)',(wid,mode,'loading',int(time.time())+600))
             print(self.name,mode,machine.accelerator.value,'runtime allocated',flush=True)
