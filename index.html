@@ -7,8 +7,8 @@
   <meta name="description" content="映室创作工作台：输入创意，生成短片或高清图片。">
   <title>映室 · 影像创作工作台</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23dff49c'/%3E%3Ccircle cx='16' cy='16' r='8' fill='none' stroke='%231f2d11' stroke-width='2.4'/%3E%3Ccircle cx='16' cy='16' r='3.4' fill='%231f2d11'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="style.css?v=preparation-progress1">
-  <script src="app.js?v=preparation-progress1" defer></script>
+  <link rel="stylesheet" href="style.css?v=gallery2col1">
+  <script src="app.js?v=gallery2col1" defer></script>
 </head>
 <body>
   <header class="top">
@@ -103,7 +103,6 @@
           </div>
 
           <p class="sub" id="qualityHint">量化加速 · 默认 768p。可写明「竖屏」「快速预览」或「保留原声」。</p>
-          <a id="modelWorker" class="sub workerLink" hidden download href="colab-worker.ipynb">下载量化执行端</a>
 
           <div class="actionrow">
             <button id="submit" disabled class="primary">提交生成 →</button>
@@ -177,6 +176,7 @@
           </div>
         </div>
 
+        <p id="jobsMsg" class="msg jobsMsg" role="status"></p>
         <div id="preparation" hidden aria-label="图片和视频 GPU 准备进度"></div>
         <div id="jobs" aria-live="off"></div>
 
@@ -184,6 +184,8 @@
           <span id="pagerInfo" class="pagerInfo"></span>
           <div id="pagerControls" class="pagerControls"></div>
         </nav>
+
+        <div id="failedWrap"></div>
       </section>
     </div>
 

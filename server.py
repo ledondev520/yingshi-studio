@@ -115,7 +115,15 @@ def cleanup(c):
 plan_wake=threading.Event()
 def run_planner(images=False):
  while True:
-  with db() as c:r=c.execute("SELECT id,prompt,seconds,precision,quality,audio_mode,aspect FROM jobs WHERE state='planning' AND (COALESCE(precision,'quantized')='image-bf16')=? ORDER BY created,rowid LIMIT 1",(images,)).fetchone()
+  with db() as c:
+   r=c.execute("SELECT id,visitor,brief,prompt,seconds,precision,quality,audio_mode,aspect FROM jobs WHERE state='planning' AND (COALESCE(precision,'quantized')='image-bf16')=? ORDER BY created,rowid LIMIT 1",(images,)).fetchone()
+   avoid=[]
+   if r:
+    for pr in c.execute("SELECT shots FROM jobs WHERE state='done' AND id!=? AND COALESCE(brief,prompt)=? AND (COALESCE(precision,'quantized')='image-bf16')=? AND ((? IS NULL AND visitor IS NULL) OR visitor=?) ORDER BY created DESC LIMIT 2",(r['id'],r['brief'] or r['prompt'],images,r['visitor'],r['visitor'])):
+     try:
+      arr=[sh.get('prompt','')[:260] for sh in json.loads(pr['shots'] or '[]') if isinstance(sh,dict) and sh.get('prompt')]
+      if arr:avoid.append(' / '.join(arr)[:500])
+     except Exception:pass
   if not r:
    plan_wake.wait(2);plan_wake.clear();continue
   start=time.monotonic(); first=None; last=0
@@ -129,7 +137,8 @@ def run_planner(images=False):
    message='正在创作' if images else '正在写第 '+str(len(parts))+' 段分镜'
    with db() as c:c.execute("UPDATE jobs SET shots=?,updated=?,message=? WHERE id=? AND state='planning'",(pack(shots),now(),message,r['id']))
   try:
-   result=image_director.plan(dict(r),KEYS,fail,progress) if images else director.plan(dict(r),KEYS,fail,progress)
+   plan_in={**dict(r),'avoid':avoid}
+   result=image_director.plan(plan_in,KEYS,fail,progress) if images else director.plan(plan_in,KEYS,fail,progress)
    qual='hd' if r['precision']=='bf16' else (r['quality'] or result['quality'])
    with db() as c:c.execute("UPDATE jobs SET shots=?,quality=?,audio_mode=COALESCE(audio_mode,'auto'),route=?,director_model=?,state='queued',updated=?,message='创作描述已完成，等待 GPU' WHERE id=? AND state='planning'",(pack(result['shots']),qual,result['route'],result['model'],now(),r['id']))
    print('director model=%s first_s=%s total_s=%.3f shots=%d'%(result['model'],first,time.monotonic()-start,len(result['shots'])),flush=True)

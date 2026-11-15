@@ -166,9 +166,15 @@ def plan(d, keys, fail, emit=None):
         '每个片段从本地 0 秒开始，后续连续片段从上一段末帧的确切姿势、人物位置和机位继续。'
         '同一首配乐跨段保持速度、乐器与节拍；无音乐/仅环境声要求优先。'
         '中文分镜与英文多模态描述均不限制字数和词数，请按叙事与画面张力充分展开、持续增补丰富细节，保留画幅、声音与人物约束。')
-    base_parts=[{'text':json.dumps({'创意':brief,'总秒数':total,'参考时长':suggested},ensure_ascii=False)}]
+    payload={'创意':brief,'总秒数':total,'参考时长':suggested}
+    if d.get('avoid'):
+        payload['同创意焕新要求']='用户点击重试希望用同一核心创意生成全新一版。请在忠实保留用户主体与核心设定前提下，更换全新的构图视角、运镜切入点、场景调度与提示词细节，避免复刻此前版本。'
+        payload['此前已生成版本摘要']=d['avoid']
+    base_parts=[{'text':json.dumps(payload,ensure_ascii=False)}]
+    gen_cfg={'responseMimeType':'application/json','responseSchema':{'type':'ARRAY','items':{'type':'STRING'},'minItems':3,'maxItems':14},'thinkingConfig':{'thinkingLevel':'LOW'},'maxOutputTokens':16384}
+    if d.get('avoid'):gen_cfg['temperature']=0.95
     body={'systemInstruction':{'parts':[{'text':instructions}]},'contents':[{'role':'user','parts':list(base_parts)}],
-          'generationConfig':{'responseMimeType':'application/json','responseSchema':{'type':'ARRAY','items':{'type':'STRING'},'minItems':3,'maxItems':14},'thinkingConfig':{'thinkingLevel':'LOW'},'maxOutputTokens':16384}}
+          'generationConfig':gen_cfg}
     def partial(parts):
         shots=[]
         for line in parts[2:14]:
