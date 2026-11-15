@@ -27,8 +27,8 @@ def run():
         slots=[m.Slot(i) for i in range(6)]
         with ThreadPoolExecutor(6) as ex:list(ex.map(lambda s:s.step(),slots))
         assert len(seen)==5 and sum(bool(s.cache.get('endpoint')) for s in slots)==1,seen
-        assert attempts[winner[0]]==['A100','H100','G4']
-        assert all(seq==['A100','H100','G4'] for ident,seq in attempts.items() if ident!=winner[0]),attempts
+        assert attempts[winner[0]]==['A100','G4']
+        assert all(seq==['A100','G4','H100'] for ident,seq in attempts.items() if ident!=winner[0]),attempts
         with m.database() as c:
             assert c.execute("select count(*) from pool_retry").fetchone()[0]==1
             # The existing parent claims an open cut for local rendering immediately.
@@ -88,3 +88,22 @@ def multiuser_pool():
         assert created==['created00001'] and slots[0].cache['folder']=='created00001'
  print('PASS 32 independent provisioning reservations, repeated polls allocate no extra runtimes, drive folder dedup')
 if __name__=='__main__':multiuser_pool()
+
+def quota_feedback():
+ with tempfile.TemporaryDirectory() as tmp:
+    root=Path(tmp);server.DATA=root;server.setup();m.DB=root/'studio.sqlite';m.PRIVATE=root;m.TOKEN=root/'token';m.TOKEN.touch()
+    with m.database() as c:
+        m.setup(c)
+        c.execute("insert into jobs(id,shots,seconds,state,route,prompt) values('j','[]',15,'planning','continuous','t')")
+    cl=Mock()
+    def refused(stable,variant,model,**kw):
+        raise m.Capacity('NO_RUNTIMES' if model==m.Accelerator.H100 else 'TOO_MANY_ACTIVE_RUNTIMES')
+    cl.assign.side_effect=refused
+    with patch.object(m,'StateStore'),patch.object(m,'creds'),patch.object(m,'PublicColab',return_value=cl):
+        slot=m.Slot(0);slot.step();slot.step()
+        assert [call.args[2] for call in cl.assign.call_args_list]==[m.Accelerator.A100,m.Accelerator.G4,m.Accelerator.H100]
+        with m.database() as c:
+            assert m.fleet.cluster_summary(c,int(time.time()))['runtime_limit']
+            assert c.execute('select stage from pool_signal').fetchone()[0]=='limit'
+ print('PASS planning preflight, A100/G4/H100 order, limit feedback survives backoff')
+if __name__=='__main__':quota_feedback()

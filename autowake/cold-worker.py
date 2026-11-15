@@ -1,3 +1,56 @@
+MODEL_CACHE_MANIFEST={'diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors': {'size': 20970379616, 'sha256': 'e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a'}, 'text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors': {'size': 15687142551, 'sha256': '35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6'}, 'vae/minimax_h3_audio_vae_fp32.safetensors': {'size': 605254808, 'sha256': '8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48'}, 'vae/minimax_h3_video_vae_int8_convrot.safetensors': {'size': 2811065184, 'sha256': '52a2c8c73583c86e4f41cdcce3a6ad0ea562987bc0bf3d60a0cef5f5c8e60c0e'}}
+"""Restore a pinned model from the private cache; incomplete files never replace models."""
+def restore_cached_model(path, name, base, worker_key, worker_id, gpu):
+    import hashlib
+    import time
+    import requests
+    meta = MODEL_CACHE_MANIFEST.get(name)
+    if not meta:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_name(path.name + '.cache.part')
+    for attempt in range(3):
+        start = partial.stat().st_size if partial.exists() else 0
+        if start > meta['size']:
+            partial.unlink(); start = 0
+        if start < meta['size']:
+            headers = {'Authorization': 'Bearer ' + worker_key, 'X-H3-Worker-ID': worker_id, 'X-H3-GPU': gpu}
+            if start:
+                headers['Range'] = f'bytes={start}-'
+            try:
+                with requests.get(base + '/api/worker/model-cache/' + meta['sha256'], headers=headers,
+                                  stream=True, timeout=(10, 60), allow_redirects=False) as response:
+                    if response.status_code == 404:
+                        return False
+                    if response.status_code in (429, 503):
+                        time.sleep(2 * (attempt + 1)); continue
+                    response.raise_for_status()
+                    if response.status_code != (206 if start else 200):
+                        raise ValueError('Cache range not honored')
+                    if (response.headers.get('X-Content-SHA256') != meta['sha256']
+                            or int(response.headers.get('Content-Length', -1)) != meta['size'] - start):
+                        raise ValueError('Cache metadata mismatch')
+                    with partial.open('ab' if start else 'wb') as out:
+                        count = start
+                        for chunk in response.iter_content(1024 * 1024):
+                            count += len(chunk)
+                            if count > meta['size']:
+                                raise ValueError('Cache response too long')
+                            out.write(chunk)
+            except requests.RequestException:
+                continue
+        if partial.exists() and partial.stat().st_size == meta['size']:
+            with partial.open('rb') as stream:
+                valid = hashlib.file_digest(stream, 'sha256').hexdigest() == meta['sha256']
+            if not valid:
+                partial.unlink()
+                raise ValueError('Model cache checksum mismatch')
+            partial.replace(path)
+            print('持久缓存已恢复：', name, flush=True)
+            return True
+    print('持久缓存暂不可用，改用原始模型源：', name, flush=True)
+    return False
+
 """Keep one instrumental bed across independently rendered H3 shots. Requires numpy and ffmpeg."""
 import math
 import os
@@ -212,13 +265,18 @@ if PRECISION=='bf16':
 else:
     from huggingface_hub import hf_hub_download
     files = {'diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors': 20970379616, 'text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors': 15687142551, 'vae/minimax_h3_audio_vae_fp32.safetensors': 605254808, 'vae/minimax_h3_video_vae_int8_convrot.safetensors': 2811065184}
-    for name, size in files.items():
+    def prepare_model(pair):
+        name, size = pair
         path = models / name
         if path.is_file() and path.stat().st_size == size:
             print('复用：', name)
-            continue
-        hf_hub_download(repo_id='Comfy-Org/MiniMax-H3', revision='54472221d27c695fca9621b0c3ed52f06c4af707', filename=name, local_dir=str(models), force_download=path.exists())
+            return
+        if not restore_cached_model(path, name, BASE, token, did, gpu_present):
+            hf_hub_download(repo_id='Comfy-Org/MiniMax-H3', revision='54472221d27c695fca9621b0c3ed52f06c4af707', filename=name, local_dir=str(models), force_download=path.exists(), token=False)
         assert path.stat().st_size == size, name
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(2) as downloads:
+        list(downloads.map(prepare_model, files.items()))
     print('四个文件已就绪')
     import time, requests
     repo = Path('/content/MiniMax-H3-ComfyUI')
@@ -380,7 +438,7 @@ def _render_piece(job,ix,path,piece,previous,update):
         cached=models/'loras'/fname
         if not cached.exists() or cached.stat().st_size!=1956193000:
             update('running',pct,'首次准备快速预览组件（约 1.96 GB）')
-            hf_hub_download(repo_id='lightx2v/Minimax-h3-Turbo',revision='30f485ed874aa44c8183348ad361c5eabad318da',filename=fname,local_dir=str(cached.parent),force_download=cached.exists())
+            hf_hub_download(repo_id='lightx2v/Minimax-h3-Turbo',revision='30f485ed874aa44c8183348ad361c5eabad318da',filename=fname,local_dir=str(cached.parent),force_download=cached.exists(),token=False)
         if not link.exists():link.symlink_to(cached)
         g['turbo']={'class_type':'LoraLoaderModelOnly','inputs':{'model':['140:127',0],'strength_model':1.0,'lora_name':fname}}
         g['140:124']['inputs'].update(model=['turbo',0],steps=8)
