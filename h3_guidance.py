@@ -63,7 +63,7 @@ def unpack(entry,index,route,allow_cut):
     sound=re.sub(r'^overall_soundscape\s*:\s*','',sound,flags=re.I).strip() or 'N/A'
     music=re.sub(r'^non_diegetic_music\s*:\s*','',music,flags=re.I).strip() or 'N/A'
     if not zh or not visual:raise ValueError(f'第 {index+1} 镜缺少中英文画面描述')
-    if any(len(f)>2700 for f in (zh,visual,sound,music)):raise ValueError(f'第 {index+1} 镜单段内容超出长度上限')
+    if any(len(f)>40000 for f in (zh,visual,sound,music)):raise ValueError(f'第 {index+1} 镜单段内容超出长度上限')
     # The current renderer has no user reference upload; only a real preceding frame.
     if re.search(r'<(?:Image|Picture|Video|Audio)\s*\d+>',visual+sound+music,re.I):
         raise ValueError(f'第 {index+1} 镜包含禁止的媒体引用标签')
