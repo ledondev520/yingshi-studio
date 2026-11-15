@@ -251,7 +251,7 @@ config=json.loads(exchange('h3managedidentity.json').read_text())
 token=config['worker_key'];did=config['worker_id'];BASE='https://withkeya.com/h3-studio'
 gpu_present=subprocess.check_output(['nvidia-smi','--query-gpu=name','--format=csv,noheader'],text=True).strip()
 if not re.search(r'\b(?:[AH]100|G4|RTX\s+PRO\s+6000\s+Blackwell)\b',gpu_present): raise RuntimeError('unsupported GPU')
-ROOT=root=Path('/content/h3-managed-data');root.mkdir(exist_ok=True)
+ROOT=root=(Path('/mnt/local-scratch') if Path('/mnt/local-scratch').is_mount() else Path('/content'))/'h3-managed-data';root.mkdir(parents=True,exist_ok=True)
 models, videos=root/'models', root/'videos'
 mounted=Path('/content/drive/MyDrive/MiniMax-H3/models')
 if mounted.is_dir():models=mounted
@@ -281,7 +281,7 @@ else:
             if not restore_cached_model(path, name, BASE, token, did, gpu_present):
                 raise
     from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(2) as downloads:
+    with ThreadPoolExecutor(4) as downloads:
         list(downloads.map(prepare_model, files.items()))
     print('四个文件已就绪')
     _preparation.stage('environment')

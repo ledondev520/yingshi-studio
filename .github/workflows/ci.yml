@@ -74,4 +74,5 @@ jobs:
           check.runtime_recovery()
           check.lost_runtime_reschedules()
           check.connection_recovery()
+          check.preempt_and_orphan_reclaim()
           PY

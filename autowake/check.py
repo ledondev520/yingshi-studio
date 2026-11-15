@@ -19,16 +19,16 @@ def run():
         with l:
             seen.add(stable);attempts.setdefault(stable,[]).append(model.value)
             first=stable==winner.setdefault(0,stable)
-        if model==m.Accelerator.A100:barrier.wait(timeout=5)
-        if not first or model!=m.Accelerator.G4:raise m.Capacity('unavailable')
+        if model==m.Accelerator.H100:barrier.wait(timeout=5)
+        if not first or model!=m.Accelerator.A100:raise m.Capacity('unavailable')
         return Mock(endpoint='runtimes/h3-'+stable.hex[:24])
     cl.assign.side_effect=assign
     with patch.object(m,'StateStore'),patch.object(m,'creds'),patch.object(m,'PublicColab',return_value=cl),patch.object(m.Slot,'initialize'),patch.object(m.Slot,'register'):
         slots=[m.Slot(i) for i in range(6)]
         with ThreadPoolExecutor(6) as ex:list(ex.map(lambda s:s.step(),slots))
         assert len(seen)==5 and sum(bool(s.cache.get('endpoint')) for s in slots)==1,seen
-        assert attempts[winner[0]]==['A100','G4']
-        assert all(seq==['A100','G4','H100'] for ident,seq in attempts.items() if ident!=winner[0]),attempts
+        assert attempts[winner[0]]==['H100','A100']
+        assert all(seq==['H100','A100','G4'] for ident,seq in attempts.items() if ident!=winner[0]),attempts
         with m.database() as c:
             assert c.execute("select count(*) from pool_retry").fetchone()[0]==1
             # The existing parent claims an open cut for local rendering immediately.
@@ -101,11 +101,11 @@ def quota_feedback():
     cl.assign.side_effect=refused
     with patch.object(m,'StateStore'),patch.object(m,'creds'),patch.object(m,'PublicColab',return_value=cl):
         slot=m.Slot(0);slot.step();slot.step()
-        assert [call.args[2] for call in cl.assign.call_args_list]==[m.Accelerator.A100,m.Accelerator.G4,m.Accelerator.H100]
+        assert [call.args[2] for call in cl.assign.call_args_list]==[m.Accelerator.H100,m.Accelerator.A100,m.Accelerator.G4]
         with m.database() as c:
             assert m.fleet.cluster_summary(c,int(time.time()))['runtime_limit']
             assert c.execute('select stage from pool_signal').fetchone()[0]=='limit'
- print('PASS planning preflight, A100/G4/H100 order, limit feedback survives backoff')
+ print('PASS planning preflight, H100/A100/G4 fast-first order, limit feedback survives backoff')
 if __name__=='__main__':quota_feedback()
 
 def runtime_recovery():
@@ -188,3 +188,50 @@ def connection_recovery():
         launch.assert_not_called();cl.assign.assert_not_called();cl.unassign.assert_not_called()
  print('PASS controller restart and transport loss reconnect the busy kernel without duplicate execution or allocation')
 if __name__=='__main__':connection_recovery()
+
+def preempt_and_orphan_reclaim():
+ """Quota exhaustion sweeps orphan h3-* VMs (never user notebooks) and preempts idle cross-mode slots immediately."""
+ from types import SimpleNamespace
+ with tempfile.TemporaryDirectory() as tmp:
+    root=Path(tmp);server.DATA=root;server.setup();m.DB=root/'studio.sqlite';m.PRIVATE=root;m.TOKEN=root/'token';m.TOKEN.touch()
+    t=int(time.time());cl=Mock()
+    orphan_ep='runtimes/h3-'+'a'*24
+    busy_ep='runtimes/h3-'+'b'*24
+    user_notebook_ep='runtimes/m-s-manual-user-notebook'
+    freed=[]
+    def list_rt():
+        active=[SimpleNamespace(endpoint=busy_ep),SimpleNamespace(endpoint=user_notebook_ep)]
+        if orphan_ep not in freed:active.append(SimpleNamespace(endpoint=orphan_ep))
+        return active
+    def unassign(ep):
+        freed.append(ep);return {}
+    def assign(stable,variant,model,**kw):
+        if orphan_ep not in freed:raise m.Capacity('TOO_MANY_ACTIVE_RUNTIMES')
+        return SimpleNamespace(endpoint='runtimes/h3-'+stable.hex[:24],accelerator=SimpleNamespace(value=model.value))
+    cl.list_assignments.side_effect=list_rt
+    cl.unassign.side_effect=unassign
+    cl.assign.side_effect=assign
+    cl.get.side_effect=lambda ep:SimpleNamespace(endpoint=ep,accelerator=SimpleNamespace(value='H100'))
+    with patch.object(m,'StateStore'),patch.object(m,'creds'),patch.object(m,'PublicColab',return_value=cl),patch.object(m.Slot,'initialize') as start,patch.object(m.Slot,'register'),patch.object(m.Slot,'attach'):
+        s_busy=m.Slot(0);s_busy.cache.update(endpoint=busy_ep,mode='quantized',born=t-100,last=t);s_busy.persist()
+        s_idle_img=m.Slot(1);s_idle_img.cache.update(endpoint='runtimes/h3-'+'c'*24,mode='image-bf16',born=t-20,last=t-5);s_idle_img.persist()
+        s_new=m.Slot(2)
+        with m.database() as c:
+            m.setup(c)
+            c.execute("insert into workers values(?,'H100',?)",(s_busy.device+'/gpu',t))
+            c.execute("insert into workers values(?,'A100',?)",(s_idle_img.device+'/gpu',t))
+            c.execute("insert into worker_modes values(?,'image-bf16')",(s_idle_img.device+'/gpu',))
+            c.execute("insert into jobs(id,shots,seconds,state,route,prompt,wid,lease,deadline) values('run1','[]',15,'running','continuous','t',?,'l1',?)",(s_busy.device+'/gpu',t+600))
+            c.execute("insert into jobs(id,shots,seconds,state,route,prompt) values('q1','[]',15,'queued','continuous','t')")
+            c.execute("insert into jobs(id,shots,seconds,state,route,prompt) values('q2','[]',15,'queued','continuous','t')")
+        # 1) s_new hits TOO_MANY_ACTIVE_RUNTIMES -> sweeps orphan_ep (preserving busy_ep and user_notebook_ep!) and immediately allocates!
+        s_new.step()
+        assert freed==[orphan_ep],'Must evict only unowned h3-* orphan and preserve manual user notebook + busy slot'
+        assert s_new.cache.get('endpoint')=='runtimes/h3-'+s_new.cache['notebook'].replace('-','')[:24]
+        start.assert_called_once()
+        # 2) q2 still needs a quantized GPU -> s_idle_img (idle only 5s ago, well below IDLE=300s!) immediately preempts itself!
+        s_idle_img.step()
+        assert 'runtimes/h3-'+'c'*24 in freed,'Idle image-bf16 slot must immediately release for queued video job'
+        assert not s_idle_img.cache.get('endpoint')
+ print('PASS orphan h3-* sweep (preserving manual user notebooks) and immediate cross-mode preemption')
+if __name__=='__main__':preempt_and_orphan_reclaim()
