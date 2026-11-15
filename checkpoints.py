@@ -50,8 +50,17 @@ def serve(h,jid,ix,root,db,fail):
   return row
  with db() as c:
   job=check(c);fingerprint=spec(job)
+  target=path(root,jid,ix,fingerprint)
   saved=c.execute('SELECT sha,size FROM shot_checkpoints WHERE job=? AND ix=? AND spec=?',(jid,ix,fingerprint)).fetchone()
- target=path(root,jid,ix,fingerprint)
+  # Recover the fsync-before-commit crash window without rendering the shot again.
+  if not saved and target.is_file():
+   size=target.stat().st_size
+   with target.open('rb') as f:
+    if not media.video_file(f,size):fail(500,'镜头备份损坏，停止重算')
+    f.seek(0);sha=hashlib.file_digest(f,'sha256').hexdigest()
+   c.execute('INSERT INTO shot_checkpoints VALUES(?,?,?,?,?,?)',(jid,ix,fingerprint,sha,size,int(time.time())))
+   saved={'sha':sha,'size':size}
+
  if not putting:
   if not saved:fail(404,'尚无此镜头备份')
   if not target.is_file() or target.stat().st_size!=saved['size']:fail(500,'镜头备份缺失，停止重复渲染')

@@ -41,6 +41,9 @@ def run(src):
    req('replacement',route,blob,'PUT',lease=nextjob['lease_token'])
    req('replacement',route,blob,'PUT',lease=nextjob['lease_token'])
    assert req('replacement',route,lease=nextjob['lease_token'])==blob
+   # Crash after the durable file is linked but before the SQLite transaction commits.
+   with server.db() as c:c.execute("DELETE FROM shot_checkpoints WHERE job='demo' AND ix=0")
+   assert req('replacement',route,lease=nextjob['lease_token'])==blob
    req('replacement','media/checkpoint/demo/99',lease=nextjob['lease_token'],status=400)
    # Changing a plan or quality cannot reuse an incompatible checkpoint.
    with server.db() as c:c.execute("UPDATE jobs SET quality='hd' WHERE id='demo'")
