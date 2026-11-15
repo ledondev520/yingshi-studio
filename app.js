@@ -714,7 +714,7 @@ function renderJobs() {
 
     const tok = j.watch_token || jobToken(j.id);
     if (tok) {
-      const lk = tx('button', copiedJobId === j.id ? '已复制 ✓' : '追踪链接', 'actBtn actSubtle');
+      const lk = tx('button', copiedJobId === j.id ? '已复制 ✓' : '分享', 'actBtn actSubtle');
       lk.type = 'button';
       lk.onclick = async () => {
         const url = location.origin + location.pathname + '#job=' + j.id + '.' + tok;
@@ -724,10 +724,10 @@ function renderJobs() {
           lk.textContent = '已复制 ✓';
           setTimeout(() => {
             if (copiedJobId === j.id) copiedJobId = '';
-            lk.textContent = '追踪链接';
+            lk.textContent = '分享';
           }, 1600);
         } catch {
-          showFormMsg('追踪链接：' + url);
+          showFormMsg('分享链接：' + url);
         }
       };
       actions.append(lk);
@@ -912,7 +912,7 @@ async function boot() {
     const [jid, jtok] = shared.split('.');
     if (/^[a-f0-9]{32}$/.test(jid || '') && /^[a-f0-9]{32}$/.test(jtok || '')) {
       rememberJobs([{ id: jid, watch_token: jtok }]);
-      $('activationMsg').textContent = '已载入任务追踪凭证，正在同步进度…';
+      $('activationMsg').textContent = '已打开分享作品，正在同步进度…';
       setTimeout(() => {
         if ($('activationMsg').textContent.includes('正在同步进度')) $('activationMsg').textContent = '';
       }, 4000);
