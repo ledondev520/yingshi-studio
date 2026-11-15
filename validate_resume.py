@@ -26,8 +26,9 @@ def run(src):
    req('helper','shot/ready',dict(id='demo',ix=ix,ticket=ticket,size=len(blob)))
    # The old runtime disappears and a different runtime owns the next lease.
    with server.db() as c:
-    c.execute("UPDATE jobs SET state='queued',lease=NULL,wid=NULL,deadline=NULL WHERE id='demo'")
+    assert server.fleet.requeue_device(c,'main',int(time.time()))==1
     server.shot_relay.gc(c,server.DATA,int(time.time())+601)
+   req('main','update',dict(id='demo',lease_token=main['lease_token'],state='running'),status=409)
    nextjob=json.loads(req('replacement','claim',{}))['job']
    assert nextjob and nextjob['lease_token']!=main['lease_token']
    route=f'media/checkpoint/demo/{ix}'

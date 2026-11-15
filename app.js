@@ -16,16 +16,17 @@ function rememberJobs(list){
 function jobToken(id){return localRead('tokens',[]).find(x=>x?.id===id)?.token||''}
 function forgetJobToken(id){localWrite('tokens',localRead('tokens',[]).filter(x=>x?.id&&x.id!==id))}
 function workerLabel(w){
- const n=Number(w?.online_count)||0,run=Number(w?.running_jobs)||0,q=Number(w?.queued_jobs)||0;
+ const n=Number(w?.online_count)||0,recovering=Number(w?.recovering_jobs)||0,run=Math.max(0,(Number(w?.running_jobs)||0)-recovering),q=Number(w?.queued_jobs)||0;
  const loading=Number(w?.loading_count)||0,requesting=Number(w?.requesting_count)||0;
  const parts=[];
  if(w?.online||n>0)parts.push(n>1?`● ${n} 张云端 GPU 在线`:'● 云端 GPU 在线');
  if(loading)parts.push(`${loading} 张 GPU 已分配，准备模型中`);
  if(requesting)parts.push(`正在申请 ${requesting} 张 GPU`);
  if(run)parts.push(`${run} 个生成中`);
+ if(recovering)parts.push(`${recovering} 个自动恢复中`);
  if(q)parts.push(`${q} 个排队`);
  if(w?.runtime_limit)parts.push('Google 活动运行时已达上限，等待空闲卡');
- if(!run&&!q&&(w?.online||n>0))parts.push('空闲可接单');
+ if(!run&&!recovering&&!q&&(w?.online||n>0))parts.push('空闲可接单');
  return parts.join(' · ')||'有任务时后台按需申请 GPU';
 }
 function showRole(value){role=value;logged=true;}
@@ -94,7 +95,7 @@ function renderJobs(){
  $('jobCount').textContent=jobs.length+' 个任务';
  if(!seen.length){c.append(tx('div',filter==='all'?'还没有任务。写下第一个创意，作品会出现在这里。':'当前筛选下没有任务。','empty'));return}
  for(const j of seen){
-  const row=tx('div','','job'),left=tx('span',states[j.state]||j.state,'pill'),mid=tx('div',''),right=tx('div','');
+  const row=tx('div','','job'),left=tx('span',j.recovering?'自动恢复':states[j.state]||j.state,'pill'),mid=tx('div',''),right=tx('div','');
   const title=(j.parent?'↳ ':'')+(j.brief||j.prompt);mid.append(tx('strong',title.length>90?title.slice(0,90)+'…':title));
   mid.append(tx('small',(j.kind==='image'?[detailDate(j.created),{landscape:'横图',portrait:'竖图',square:'方幅'}[j.aspect],jobMessage(j)]:[detailDate(j.created),modeLabel(j.precision),(j.total_seconds||j.seconds)+' 秒',j.quality==='hd'?'高清 768p':j.quality==='fast'?'快速预览':'',j.shots.length+' 镜',j.message]).filter(Boolean).join(' · ')));
   if(j.state==='running')runningDetail(j,mid);

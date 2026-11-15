@@ -107,11 +107,11 @@ class Slot:
         except subprocess.TimeoutExpired:return
         if code:raise RuntimeError('kernel launch failed')
     def clear(self):
-        for k in ('endpoint','pending','sent','born','launched','last','mode','external'):self.cache.pop(k,None)
+        for k in ('endpoint','pending','sent','born','launched','last','mode','external','retry'):self.cache.pop(k,None)
         self.persist()
         if self.store.get(self.name):self.store.remove(self.name)
         with database() as c:
-            c.execute("UPDATE jobs SET state='queued',lease=NULL,deadline=NULL,wid=NULL,updated=?,message='原 GPU 运行时已结束，保留已完成镜头并重新调度' WHERE state='running' AND instr(wid,?||'/')=1",(int(time.time()),self.device))
+            fleet.requeue_device(c,self.device,int(time.time()))
             c.execute('delete from pool_boots where device=?',(self.device,))
             c.execute('delete from pool_signal where device=?',(self.device,))
             c.execute('delete from worker_drain where device=?',(self.device,))
@@ -162,7 +162,8 @@ class Slot:
             try:machine=cl.get(ep)
             except Exception as e:
                 if getattr(getattr(e,'response',None),'status_code',None)!=404:raise
-                if owned:self.clear();return
+                if owned:
+                    self.clear();print(self.name,'runtime missing (404); work requeued',flush=True);return
                 if not want:
                     if t-a.get('pending',t)>600:self.clear()
                     return
@@ -195,7 +196,7 @@ class Slot:
             if broken and not a.get('endpoint'):
                 with database() as c:c.execute('insert or replace into pool_retry values(?,?)',(mode,t+1800))
             return
-        if not live and want and time.time()-a.get('launched',0)>150:
+        if not live and (want or mine or helps) and time.time()-a.get('launched',0)>150:
             try:
                 self.initialize(self.register(machine))
                 a['launched']=time.time();self.persist()
