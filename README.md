@@ -70,3 +70,9 @@ python3 validate_relay.py /path/to/small-test.mp4
 源码快照取自 2026-11-15 检查时正在运行的 release `sampling-b0f687dbe207`。公开副本只将两个 Google Cloud 项目 ID 改为占位符，新增本说明和忽略规则；没有改变线上部署。
 
 `vendor/minimax-h3` 是已有的官方提示词资料快照，来源和固定提交见 [UPSTREAM.md](vendor/minimax-h3/UPSTREAM.md)。第三方资料、模型和依赖仍适用各自许可。本次公开源码未另行授予开源许可证。
+
+## 断点恢复
+
+每个完成镜头在进入下一镜前上传到 VPS 私有 `shot-checkpoints/`，以任务渲染计划和 SHA-256 校验。换卡或租约过期后先恢复已完成镜头，再生成缺失部分；中转票据清理不再删除持久片段。修改分镜、精度或画质会使旧计划的片段失效。仍未完成的采样步不会跨机器恢复。
+
+自动工作端在 Colab 内核中运行实际任务，避免启动器提前返回导致内核空闲。运行时仍可能被平台回收，故片段备份是必要保障。`validate_resume.py` 验证失联、清理、跨租约恢复及只渲染缺失镜头；`validate_launch.py` 验证启动器不会早于实际工作返回。

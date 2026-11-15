@@ -2,6 +2,7 @@
 import shutil
 import threading
 import media
+import checkpoints
 import director
 import sampling
 import shot_tasks, fleet, shot_relay
@@ -40,7 +41,7 @@ def db():
 def setup():
  DATA.mkdir(parents=True,exist_ok=True);media.initialize(DATA);_watch_secret()
  with sqlite3.connect(DATA/"studio.sqlite") as c:
-  c.execute("PRAGMA journal_mode=WAL")
+  c.execute("PRAGMA journal_mode=WAL");checkpoints.setup(c)
   c.executescript("""CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, request TEXT UNIQUE, prompt TEXT, shots TEXT, seconds INTEGER, state TEXT, progress INTEGER, message TEXT, created INTEGER, updated INTEGER, wid TEXT, gpu TEXT, lease TEXT, deadline INTEGER, tries INTEGER DEFAULT 0, result TEXT);
   CREATE TABLE IF NOT EXISTS worker_modes(id TEXT PRIMARY KEY,precision TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS pairs(verifier TEXT PRIMARY KEY, device TEXT, gpu TEXT, code TEXT UNIQUE, expiry INTEGER, approved INTEGER DEFAULT 0);
@@ -80,6 +81,7 @@ def jobrow(r,internal=False,c=None):
  if not internal:x['watch_token']=watch_token(r['id'])
  if not internal and c is not None and r['state']=='running':x['sampling']=sampling.visible(c,r,now())
  if internal:
+  x['checkpoint_spec']=checkpoints.spec(r)
   # Existing Colab workers read shot.prompt; keep the owner's storyboard in Chinese.
   x['shots']=[{**shot,'prompt':shot.get('h3_prompt') or shot['prompt']} for shot in x['shots']]
   x['lease_token']=r['lease']
@@ -168,6 +170,8 @@ class Handler(BaseHTTPRequestHandler):
   qtoken=(qs.get('token') or [self.headers.get('X-H3-Watch-Token','')])[0]
   m=re.fullmatch(r'/api/media/([A-Za-z0-9_-]{1,120})',p)
   if m and self.command in ('GET','HEAD'):return media.serve(self,m[1],DATA,db,fail,watch_ok=valid_watch(m[1],qtoken))
+  checkpoint=re.fullmatch(r'/api/worker/media/checkpoint/([A-Za-z0-9_-]{1,120})/([0-9]{1,2})',p)
+  if checkpoint and self.command in ('PUT','GET','HEAD'):return checkpoints.serve(self,checkpoint[1],int(checkpoint[2]),DATA,db,fail)
   relay=re.fullmatch(r'/api/worker/media/shot/([0-9a-f]{32})',p)
   if relay and self.command in ('PUT','GET'):return shot_relay.serve(self,relay[1],DATA,db,fail)
   m=re.fullmatch(r'/api/worker/media/([A-Za-z0-9_-]{1,120})',p)

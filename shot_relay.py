@@ -1,6 +1,6 @@
 """Private, lease-bound transfer for Colab VMs without a shared filesystem."""
 import hashlib,hmac,os,re,shutil,tempfile,threading,time
-import media, fleet
+import media, fleet, checkpoints
 slots=threading.BoundedSemaphore(fleet.MAX_CARDS-1)
 def setup(c):
     c.execute('create table if not exists shot_relay(ticket text primary key,created integer,size integer,sha text)')
@@ -53,6 +53,11 @@ def serve(h,ticket,root,db,fail):
         with db() as c:
             r=check(c)
             if r['sha'] and r['sha']!=want:fail(409,'片段已提交')
+            with open(tmp,'rb') as committed:os.fsync(committed.fileno())
+            task=c.execute('SELECT job_id,ix FROM shot_tasks WHERE ticket=?',(ticket,)).fetchone()
+            job=c.execute('SELECT * FROM jobs WHERE id=?',(task['job_id'],)).fetchone()
+            try:checkpoints.retain(c,root,job,task['ix'],tmp,want,n)
+            except ValueError:fail(409,'已完成的镜头不可覆盖')
             os.replace(tmp,path);tmp=None;c.execute('update shot_relay set sha=?,size=? where ticket=?',(want,n,ticket))
         return h.send(200,{'ok':True})
     finally:

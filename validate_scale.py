@@ -47,7 +47,7 @@ def available_work():
             order.append(i);dest.write_text(str(i))
         tree=ast.parse(Path(__file__).with_name('colab-worker.py').read_text())
         fn=next(n for n in tree.body if getattr(n,'name','')=='render_job')
-        env=dict(ACTIVE_DIR=root,videos=root,hashlib=hashlib,rpc=rpc,dimensions=lambda job:(768,448),take_assisted_piece=take,render_piece=piece)
+        env=dict(ACTIVE_DIR=root,videos=root,hashlib=hashlib,rpc=rpc,dimensions=lambda job:(768,448),take_assisted_piece=take,render_piece=piece,restore_pieces=lambda job,pieces,update:{i for i,p in enumerate(pieces) if not p.is_file()})
         exec(compile(ast.Module(body=[fn],type_ignores=[]),'<worker>','exec'),env)
         try:env['render_job'](dict(id='x',lease_token='t',seconds=60,parallel_cuts=True,shots=[{'seconds':15,'cut':flag} for flag in [False,True,True,False]]))
         except Assemble:pass

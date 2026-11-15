@@ -1,12 +1,8 @@
-# Executed by Colab CLI on our own named VM, never in a visitor's browser.
+"""Run real work inside the kernel, so Colab does not see an idle notebook."""
 from pathlib import Path
-import subprocess,sys,fcntl
+import contextlib,runpy
 p=next(p for p in [Path('/content/h3managedworker.py'),Path('/h3managedworker.py'),Path.cwd()/'h3managedworker.py'] if p.is_file())
-with open('/content/h3-managed.lock','a') as lock:
-    try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB);running=False
-    except BlockingIOError:running=True
-if not running:
-    log=open('/content/h3-managed-start.log','ab')
-    subprocess.Popen([sys.executable,'-u',str(p)],stdout=log,stderr=log,start_new_session=True,cwd='/content',stdin=subprocess.DEVNULL)
-    log.close()
-print('H3_LAUNCHED')
+print('H3_LAUNCHED',flush=True)
+with open('/content/h3-managed-start.log','a',buffering=1) as log:
+    with contextlib.redirect_stdout(log),contextlib.redirect_stderr(log):
+        runpy.run_path(str(p),run_name='__main__')

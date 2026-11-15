@@ -1,5 +1,6 @@
 """Parallel cutaways. The parent runtime always owns continuity and final assembly."""
 import fleet
+import checkpoints
 import hmac
 import json
 import secrets
@@ -16,6 +17,7 @@ def offer(c, job):
     shots=json.loads(job['shots'])
     if len(shots)<3 or job['route']=='continuous': return
     for ix, shot in enumerate(shots):
+        if c.execute('SELECT 1 FROM shot_checkpoints WHERE job=? AND ix=? AND spec=?',(job['id'],ix,checkpoints.spec(job))).fetchone():continue
         if ix and shot.get('cut') is True:
             c.execute("INSERT INTO shot_tasks(job_id,epoch,ix,state) VALUES(?,?,?,'open')",
                       (job['id'],job['lease'],ix))
