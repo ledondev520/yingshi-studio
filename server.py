@@ -9,7 +9,7 @@ import base64, contextlib, hashlib, hmac, json, os, re, secrets, sqlite3, time, 
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 ROOT=Path(__file__).resolve().parent
 DATA=Path(os.environ.get("STUDIO_DATA","/var/lib/h3-studio"))
 KEYS=Path(os.environ.get("STUDIO_KEYS","/etc/h3-studio"))
@@ -19,6 +19,17 @@ PORT=int(os.environ.get("STUDIO_PORT","18763"))
 def key(n):return (KEYS/n).read_text().strip()
 def now():return int(time.time())
 def pack(x):return json.dumps(x,ensure_ascii=False,separators=(",",":"))
+def _watch_secret():
+ p=DATA/"watch.key"
+ if not p.is_file():
+  DATA.mkdir(parents=True,exist_ok=True)
+  tmp=p.with_suffix(".tmp");fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
+  try:os.write(fd,secrets.token_bytes(32))
+  finally:os.close(fd)
+  tmp.replace(p)
+ return p.read_bytes()
+def watch_token(jid):return hmac.new(_watch_secret(),("watch:"+jid).encode(),hashlib.sha256).hexdigest()[:32]
+def valid_watch(jid,tok):return isinstance(jid,str) and isinstance(tok,str) and bool(re.fullmatch(r"[a-f0-9]{32}",tok)) and hmac.compare_digest(watch_token(jid),tok)
 @contextlib.contextmanager
 def db():
  c=sqlite3.connect(DATA/"studio.sqlite",timeout=12,isolation_level=None);c.row_factory=sqlite3.Row
@@ -27,7 +38,7 @@ def db():
  except: c.rollback();raise
  finally:c.close()
 def setup():
- DATA.mkdir(parents=True,exist_ok=True);media.initialize(DATA)
+ DATA.mkdir(parents=True,exist_ok=True);media.initialize(DATA);_watch_secret()
  with sqlite3.connect(DATA/"studio.sqlite") as c:
   c.execute("PRAGMA journal_mode=WAL")
   c.executescript("""CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, request TEXT UNIQUE, prompt TEXT, shots TEXT, seconds INTEGER, state TEXT, progress INTEGER, message TEXT, created INTEGER, updated INTEGER, wid TEXT, gpu TEXT, lease TEXT, deadline INTEGER, tries INTEGER DEFAULT 0, result TEXT);
@@ -66,22 +77,28 @@ def jobrow(r,internal=False,c=None):
  x['total_seconds']=(r['total_seconds'] if 'total_seconds' in r.keys() else None) or r['seconds']
  x['append_source']=bool(x['parent'] and x['total_seconds']>x['seconds'])
  x['route']=r['route'];x['model']=r['director_model']
+ if not internal:x['watch_token']=watch_token(r['id'])
  if not internal and c is not None and r['state']=='running':x['sampling']=sampling.visible(c,r,now())
  if internal:
   # Existing Colab workers read shot.prompt; keep the owner's storyboard in Chinese.
   x['shots']=[{**shot,'prompt':shot.get('h3_prompt') or shot['prompt']} for shot in x['shots']]
   x['lease_token']=r['lease']
   if r['route'] in director.ROUTES:x['prompt']+='。镜头指导：'+director.ROUTES[r['route']]
- if c is not None and r['state']=='queued':x['message']=fleet.wait_message(c,r['precision'] or 'quantized',now()) or x['message']
+ if c is not None and r['state']=='queued':
+  t=now();x['queue_position']=fleet.queue_position(c,r,t)
+  x['message']=fleet.wait_message(c,r['precision'] or 'quantized',t,r) or x['message']
  return x
-def worker_status(wr):return {'online':bool(wr and now()-wr['seen']<100),'gpu':wr['gpu'] if wr else None,'seen':wr['seen'] if wr else None}
+def worker_status(wr,c=None):
+ out={'online':bool(wr and now()-wr['seen']<100),'gpu':wr['gpu'] if wr else None,'seen':wr['seen'] if wr else None}
+ if c is not None:out.update(fleet.cluster_summary(c,now()))
+ return out
 def cleanup(c):
  t=now()
  c.execute("UPDATE jobs SET state=CASE WHEN tries<3 THEN 'queued' ELSE 'failed' END, message=CASE WHEN tries<3 THEN '执行端断线，等待重连' ELSE '连续三次断线，请重新提交' END, lease=NULL,deadline=NULL,wid=NULL,updated=? WHERE state='running' AND deadline<?",(t,t))
 plan_wake=threading.Event()
 def run_planner():
  while True:
-  with db() as c:r=c.execute("SELECT id,prompt,seconds,precision FROM jobs WHERE state='planning' ORDER BY created,rowid LIMIT 1").fetchone()
+  with db() as c:r=c.execute("SELECT id,prompt,seconds,precision,quality,audio_mode FROM jobs WHERE state='planning' ORDER BY created,rowid LIMIT 1").fetchone()
   if not r:
    plan_wake.wait(2);plan_wake.clear();continue
   start=time.monotonic(); first=None; last=0
@@ -94,7 +111,8 @@ def run_planner():
    with db() as c:c.execute("UPDATE jobs SET shots=?,updated=?,message=? WHERE id=? AND state='planning'",(pack([{'prompt':x,'seconds':0} for x in parts]),now(),'正在写第 '+str(len(parts))+' 段分镜',r['id']))
   try:
    result=director.plan(dict(r),KEYS,fail,progress)
-   with db() as c:c.execute("UPDATE jobs SET shots=?,quality=?,audio_mode=COALESCE(audio_mode,'auto'),route=?,director_model=?,state='queued',updated=?,message='分镜已完成，等待 GPU' WHERE id=? AND state='planning'",(pack(result['shots']),'hd' if r['precision']=='bf16' else result['quality'],result['route'],result['model'],now(),r['id']))
+   qual='hd' if r['precision']=='bf16' else (r['quality'] or result['quality'])
+   with db() as c:c.execute("UPDATE jobs SET shots=?,quality=?,audio_mode=COALESCE(audio_mode,'auto'),route=?,director_model=?,state='queued',updated=?,message='分镜已完成，等待 GPU' WHERE id=? AND state='planning'",(pack(result['shots']),qual,result['route'],result['model'],now(),r['id']))
    print('director model=%s first_s=%s total_s=%.3f shots=%d'%(result['model'],first,time.monotonic()-start,len(result['shots'])),flush=True)
   except Exception as e:
    msg=str(e) if isinstance(e,Problem) else '分镜生成失败，请重新提交。'
@@ -146,9 +164,10 @@ class Handler(BaseHTTPRequestHandler):
    if not proof or proof['device']!=d.get('worker_id'):fail(403,'请配对此工作端')
   return worker_fields(d)
  def dispatch(self):
-  p=urlsplit(self.path).path
+  parts=urlsplit(self.path);p=parts.path;qs=parse_qs(parts.query)
+  qtoken=(qs.get('token') or [self.headers.get('X-H3-Watch-Token','')])[0]
   m=re.fullmatch(r'/api/media/([A-Za-z0-9_-]{1,120})',p)
-  if m and self.command in ('GET','HEAD'):return media.serve(self,m[1],DATA,db,fail)
+  if m and self.command in ('GET','HEAD'):return media.serve(self,m[1],DATA,db,fail,watch_ok=valid_watch(m[1],qtoken))
   relay=re.fullmatch(r'/api/worker/media/shot/([0-9a-f]{32})',p)
   if relay and self.command in ('PUT','GET'):return shot_relay.serve(self,relay[1],DATA,db,fail)
   m=re.fullmatch(r'/api/worker/media/([A-Za-z0-9_-]{1,120})',p)
@@ -271,7 +290,7 @@ class Handler(BaseHTTPRequestHandler):
     try: self.visitor(c)
     except Problem:
      tok=secrets.token_hex(32);wr=c.execute('SELECT gpu,seen FROM workers ORDER BY seen DESC LIMIT 1').fetchone()
-     return self.send(200,{'role':'guest','jobs':[],'draft':None,'worker':worker_status(wr),'online_modes':online_modes(c),'now':now()},hdr={'Set-Cookie':f'h3_vid={tok}; Max-Age=15552000'+cookie_attr})
+     return self.send(200,{'role':'guest','jobs':[],'draft':None,'worker':worker_status(wr,c),'online_modes':online_modes(c),'now':now()},hdr={'Set-Cookie':f'h3_vid={tok}; Max-Age=15552000'+cookie_attr})
   if p=='/api/activate' and self.command=='POST':
    raw=s(d.get('token'),180)
    with db() as c:
@@ -290,15 +309,26 @@ class Handler(BaseHTTPRequestHandler):
      tok=secrets.token_urlsafe(36);c.execute('DELETE FROM sessions WHERE expiry<?',(now(),));c.execute('INSERT INTO sessions VALUES(?,?)',(digest(tok),now()+30*86400))
    if not ok:fail(401,'口令不正确')
    return self.send(200,{'ok':True},hdr={'Set-Cookie':f'h3_sid={tok}; Max-Age=2592000'+cookie_attr})
+  extra_hdr=None
   with db() as c:
-   visitor=self.visitor(c)
-   public=p in ('/api/state','/api/create','/api/cancel') or re.fullmatch(r'/api/creation/[a-f0-9]{32}',p)
+   mc=re.fullmatch(r'/api/creation/([a-f0-9]{32})',p)
+   watch_creation=bool(mc and self.command=='GET' and valid_watch(mc[1],qtoken))
+   watch_cancel=bool(p=='/api/cancel' and self.command=='POST' and valid_watch(s(d.get('id'),100),s(d.get('watch_token'),64) or qtoken))
+   if watch_creation or watch_cancel:
+    visitor=None
+   else:
+    try:visitor=self.visitor(c)
+    except Problem:
+     if p=='/api/create' and self.command=='POST':
+      new_tok=secrets.token_hex(32);visitor=digest(new_tok);extra_hdr={'Set-Cookie':f'h3_vid={new_tok}; Max-Age=15552000'+cookie_attr}
+     else:raise
+   public=p in ('/api/state','/api/create','/api/cancel') or bool(mc)
    if visitor and not public:fail(403,'无权执行此操作')
    cleanup(c)
    if p=='/api/state' and self.command=='GET':
     dr=c.execute('SELECT data FROM drafts WHERE id=1').fetchone();wr=c.execute('SELECT gpu,seen FROM workers ORDER BY seen DESC LIMIT 1').fetchone()
     rows=c.execute('SELECT * FROM jobs WHERE ? IS NULL OR visitor=? ORDER BY created DESC,rowid DESC LIMIT 80',(visitor,visitor))
-    out={'role':'guest' if visitor else 'owner','jobs':[jobrow(r,c=c) for r in rows],'draft':json.loads(dr['data']) if dr and not visitor else None,'worker':worker_status(wr),'online_modes':online_modes(c),'now':now()}
+    out={'role':'guest' if visitor else 'owner','jobs':[jobrow(r,c=c) for r in rows],'draft':json.loads(dr['data']) if dr and not visitor else None,'worker':worker_status(wr,c),'online_modes':online_modes(c),'now':now()}
    elif p=='/api/devices/link' and self.command=='POST':
     token=secrets.token_urlsafe(36);exp=now()+600
     c.execute('DELETE FROM activations WHERE expiry<=?',(now(),));c.execute('INSERT INTO activations VALUES(?,?)',(digest(token),exp))
@@ -313,16 +343,21 @@ class Handler(BaseHTTPRequestHandler):
     if not isinstance(d.get('shots',[]),list):fail(400,'分镜有误')
     draft={'precision':precision(d),'audio_mode':d.get('audio_mode') if d.get('audio_mode') in ('auto','original','continuous') else 'auto','quality':d.get('quality') if d.get('quality') in ('fast','hd','standard') else 'hd','parent':s(d.get('parent'),100),'route':d.get('route') if d.get('route') in ('continuous','story','dialogue','mood') else 'story','prompt':s(d.get('prompt'),4000),'seconds':d.get('seconds') if type(d.get('seconds')) is int and 5<=d['seconds']<=120 else 10,'shots':[{'prompt':s(i.get('prompt'),2000),'seconds':i.get('seconds') if i.get('seconds') in (5,10,15) else 10} for i in d.get('shots',[])[:12] if isinstance(i,dict)]}
     c.execute('INSERT INTO drafts VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,updated=excluded.updated',(pack(draft),now()));out={'ok':True}
-   elif re.fullmatch(r'/api/creation/[a-f0-9]{32}',p) and self.command=='GET':
-    r=c.execute('SELECT * FROM jobs WHERE id=?',(p.rsplit('/',1)[1],)).fetchone()
-    if not r or (visitor and r['visitor']!=visitor):fail(404,'没有此任务')
+   elif mc and self.command=='GET':
+    r=c.execute('SELECT * FROM jobs WHERE id=?',(mc[1],)).fetchone()
+    if not r or (not watch_creation and visitor and r['visitor']!=visitor):fail(404,'没有此任务')
     out={'job':jobrow(r,c=c)}
    elif p=='/api/create' and self.command=='POST':
     mode=precision(d);brief=s(d.get('prompt'),4000);sec=d.get('seconds');req=s(d.get('request_id'),100);parent=s(d.get('parent'),100) or None
+    raw_am=d.get('audio_mode');raw_q=d.get('quality')
+    if raw_am is not None and raw_am not in ('auto','original','continuous'):fail(400,'无效的声音设置')
+    if raw_q is not None and raw_q not in ('auto','standard','fast','hd'):fail(400,'无效生成模式')
+    explicit_q=None if raw_q in (None,'auto') else raw_q
+    if mode=='bf16' and explicit_q not in (None,'hd'):fail(400,'BF16 使用原始 768p 配置')
     if not brief or type(sec) is not int or not 15<=sec<=120 or not re.fullmatch(r'[a-zA-Z0-9-]{16,100}',req):fail(400,'请输入创意，并选择 15 至 120 秒。')
     r=c.execute('SELECT * FROM jobs WHERE request=?',(req,)).fetchone()
     if r and visitor and r['visitor']!=visitor:fail(409,'请求编号不可用。')
-    if r and ((r['precision'] or 'quantized')!=mode or r['brief']!=brief or r['seconds']!=sec or r['parent']!=parent):fail(409,'同一请求编号的内容不同')
+    if r and ((r['precision'] or 'quantized')!=mode or r['brief']!=brief or r['seconds']!=sec or r['parent']!=parent or (raw_am is not None and (r['audio_mode'] or 'auto')!=raw_am) or (explicit_q is not None and r['state']=='planning' and r['quality']!=explicit_q)):fail(409,'同一请求编号的内容不同')
     if not r:
      if c.execute("SELECT COUNT(*) FROM jobs WHERE state IN ('planning','queued','running')").fetchone()[0]>=12:fail(429,'队列已满，请稍后再试')
      if visitor:
@@ -340,7 +375,7 @@ class Handler(BaseHTTPRequestHandler):
       prompt='仅编排原片之后新增的 '+str(sec)+' 秒。第一镜从原片最后一帧继续，保持角色、机位和画幅。原片背景：'+prior['prompt'][-3000:]+'。接下来发生：'+brief
      jid=uuid.uuid4().hex
      c.execute("INSERT INTO jobs(precision,visitor,id,request,parent,brief,prompt,seconds,state,progress,shots,message,created,updated) VALUES(?,?,?,?,?,?,?,?,'planning',0,'[]','已收到创意，等待编排',?,?)",(mode,visitor,jid,req,parent,brief,prompt,sec,now(),now()))
-     c.execute('UPDATE jobs SET total_seconds=? WHERE id=?',(total,jid))
+     c.execute('UPDATE jobs SET total_seconds=?,audio_mode=?,quality=? WHERE id=?',(total,raw_am,explicit_q,jid))
      r=c.execute('SELECT * FROM jobs WHERE id=?',(jid,)).fetchone()
     out={'job':jobrow(r,c=c)};plan_wake.set()
    elif p=='/api/jobs' and self.command=='POST':
@@ -370,7 +405,7 @@ class Handler(BaseHTTPRequestHandler):
    elif p=='/api/logout' and self.command=='POST':
     c.execute('DELETE FROM sessions WHERE digest=?',(self.session(c),));out={'ok':True}
    else:fail(404,'无此接口')
-  self.send(200,out)
+  self.send(200,out,hdr=extra_hdr)
  def handle_req(self):
   try:self.dispatch()
   except Problem as e:self.send(e.code,{'error':str(e)})
