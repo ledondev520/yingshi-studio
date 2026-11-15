@@ -160,6 +160,16 @@ def put(h,jid,data,db,worker,fail):
   if tmp:tmp.unlink(missing_ok=True)
   SLOTS.release()
 
+def _etag_match(header,etag):
+ if not header:return False
+ norm=etag[2:] if etag.startswith('W/') else etag
+ for item in header.split(','):
+  tok=item.strip()
+  if tok=='*':return True
+  if tok.startswith('W/'):tok=tok[2:]
+  if tok==norm:return True
+ return False
+
 def serve(h,jid,data,db,fail,watch_ok=False,preview=False,download=False):
  with db() as c:
   visitor=None if watch_ok else h.visitor(c)
@@ -170,12 +180,13 @@ def serve(h,jid,data,db,fail,watch_ok=False,preview=False,download=False):
  if preview:
   if preview_status(data,r)!='ready':fail(409,'预览版准备中，高清原片可下载')
   target=preview_path(data,r);etag='"'+r['media_sha']+'-preview-v1"'
-  if h.headers.get('If-None-Match') in (etag,'*'):
-   h.send_response(304);h.send_header('ETag',etag);h.send_header('Cache-Control','private, no-cache');h.end_headers()
+  if not h.headers.get('Range') and _etag_match(h.headers.get('If-None-Match'),etag):
+   h.send_response(304);h.send_header('ETag',etag);h.send_header('Accept-Ranges','bytes');h.send_header('Cache-Control','private, no-cache');h.end_headers()
    return
  with open(target,'rb') as f:
   size=os.fstat(f.fileno()).st_size;first,last=0,size-1;partial=False
-  raw=h.headers.get('Range') if h.headers.get('If-Range',etag)==etag else None
+  ifr=h.headers.get('If-Range')
+  raw=h.headers.get('Range') if (not ifr or _etag_match(ifr,etag)) else None
   if raw:
    m=re.fullmatch(r'bytes=(\d{0,18})-(\d{0,18})',raw)
    if m and any(m.groups()):
