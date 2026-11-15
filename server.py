@@ -17,6 +17,9 @@ KEYS=Path(os.environ.get("STUDIO_KEYS","/etc/h3-studio"))
 ORIGIN=os.environ.get("STUDIO_ORIGIN","https://withkeya.com")
 PREFIX="/h3-studio"
 PORT=int(os.environ.get("STUDIO_PORT","18763"))
+MAX_PENDING=320
+MAX_VISITOR_PENDING=10
+MAX_IP_SUBMISSIONS=600
 def key(n):return (KEYS/n).read_text().strip()
 def now():return int(time.time())
 def pack(x):return json.dumps(x,ensure_ascii=False,separators=(",",":"))
@@ -95,8 +98,7 @@ def worker_status(wr,c=None):
  if c is not None:out.update(fleet.cluster_summary(c,now()))
  return out
 def cleanup(c):
- t=now()
- c.execute("UPDATE jobs SET state=CASE WHEN tries<3 THEN 'queued' ELSE 'failed' END, message=CASE WHEN tries<3 THEN '执行端断线，等待重连' ELSE '连续三次断线，请重新提交' END, lease=NULL,deadline=NULL,wid=NULL,updated=? WHERE state='running' AND deadline<?",(t,t))
+ fleet.requeue_expired(c,now())
 plan_wake=threading.Event()
 def run_planner():
  while True:
@@ -241,13 +243,14 @@ class Handler(BaseHTTPRequestHandler):
      if active and (active['precision'] or 'quantized')==mode and active['wid']==wid and s(d.get('resume_lease'),128) and hmac.compare_digest(active['lease'],s(d.get('resume_lease'),128)):
       r=active
      occupied=bool(active or shot_tasks.busy(c,wid,t))
-     assist=None if occupied else shot_tasks.claim(c,wid,d,t,jobrow)
-     if not occupied and not assist:
+     assist=None
+     if not occupied:
       r=c.execute("SELECT * FROM jobs WHERE state='queued' AND (total_seconds IS NULL OR total_seconds=seconds OR ?) AND COALESCE(precision,'quantized')=? AND (COALESCE(quality,'standard')='standard' OR (quality='fast' AND ?) OR (quality='hd' AND ?)) AND (COALESCE(audio_mode,'original')='original' OR ?) ORDER BY created,id LIMIT 1",(int(d.get('append_v1') is True),mode,int(d.get('turbo8') is True),int(d.get('finish_v2') is True),int(d.get('finish_v2') is True))).fetchone()
       if r:
        c.execute("UPDATE jobs SET state='running',message='GPU 已领取任务',progress=0,wid=?,gpu=?,lease=?,deadline=?,updated=?,tries=tries+1 WHERE id=?",(wid,gpu,secrets.token_urlsafe(24),t+600,t,r['id']))
        r=c.execute("SELECT * FROM jobs WHERE id=?",(r['id'],)).fetchone()
        if slot and d.get('shot_v1') is True:shot_tasks.offer(c,r)
+      else:assist=shot_tasks.claim(c,wid,d,t,jobrow)
      out={'job':jobrow(r,True) if r else None,'assist':assist}
      if r and c.execute('SELECT 1 FROM shot_tasks WHERE job_id=? AND epoch=? LIMIT 1',(r['id'],r['lease'])).fetchone():out['job']['parallel_cuts']=True
     elif p=='/api/worker/update':
@@ -363,12 +366,12 @@ class Handler(BaseHTTPRequestHandler):
     if r and visitor and r['visitor']!=visitor:fail(409,'请求编号不可用。')
     if r and ((r['precision'] or 'quantized')!=mode or r['brief']!=brief or r['seconds']!=sec or r['parent']!=parent or (raw_am is not None and (r['audio_mode'] or 'auto')!=raw_am) or (explicit_q is not None and r['state']=='planning' and r['quality']!=explicit_q)):fail(409,'同一请求编号的内容不同')
     if not r:
-     if c.execute("SELECT COUNT(*) FROM jobs WHERE state IN ('planning','queued','running')").fetchone()[0]>=12:fail(429,'队列已满，请稍后再试')
+     if c.execute("SELECT COUNT(*) FROM jobs WHERE state IN ('planning','queued','running')").fetchone()[0]>=MAX_PENDING:fail(429,'队列已满，请稍后再试')
      if visitor:
       ip='public:'+digest(self.headers.get('X-Real-IP') or self.client_address[0]);bucket=now()//3600
       limit=c.execute('SELECT minute,n FROM throttles WHERE ip=?',(ip,)).fetchone()
-      if limit and limit['minute']==bucket and limit['n']>=12:fail(429,'本小时提交较多，请稍后再试。')
-      if c.execute("SELECT COUNT(*) FROM jobs WHERE visitor=? AND state IN ('planning','queued','running')",(visitor,)).fetchone()[0]>=2:fail(429,'请等已有任务完成后再提交。')
+      if limit and limit['minute']==bucket and limit['n']>=MAX_IP_SUBMISSIONS:fail(429,'本小时提交较多，请稍后再试。')
+      if c.execute("SELECT COUNT(*) FROM jobs WHERE visitor=? AND state IN ('planning','queued','running')",(visitor,)).fetchone()[0]>=MAX_VISITOR_PENDING:fail(429,f'已有 {MAX_VISITOR_PENDING} 个任务等待或生成，请等任务完成后再提交。')
       c.execute('INSERT INTO throttles VALUES(?,?,1) ON CONFLICT(ip) DO UPDATE SET minute=excluded.minute,n=CASE WHEN minute=excluded.minute THEN n+1 ELSE 1 END',(ip,bucket))
      prompt=brief;total=sec
      if parent:
@@ -399,7 +402,7 @@ class Handler(BaseHTTPRequestHandler):
     r=c.execute('SELECT * FROM jobs WHERE request=?',(req,)).fetchone()
     if r and ((r['precision'] or 'quantized')!=mode or (r['audio_mode'] or 'original')!=audio_mode or (r['quality'] or 'standard')!=quality or r['parent']!=parent or r['prompt']!=prompt or json.loads(r['shots'])!=shots or r['seconds']!=sec):fail(409,'同一请求编号的内容不同')
     if not r:
-     if c.execute("SELECT count(*) FROM jobs WHERE state IN ('queued','running')").fetchone()[0]>=12:fail(429,'已有 12 个任务等待或生成，请先处理队列')
+     if c.execute("SELECT count(*) FROM jobs WHERE state IN ('planning','queued','running')").fetchone()[0]>=MAX_PENDING:fail(429,'队列已满，请稍后再试')
      jid=uuid.uuid4().hex
      c.execute("INSERT INTO jobs(id,request,prompt,shots,seconds,state,progress,message,created,updated) VALUES(?,?,?,?,?,'queued',0,'已保存，等待 GPU',?,?)",(jid,req,prompt,pack(shots),sec,now(),now()));c.execute('UPDATE jobs SET parent=?,brief=?,quality=?,audio_mode=?,precision=? WHERE id=?',(parent,brief,quality,audio_mode,mode,jid));r=c.execute('SELECT * FROM jobs WHERE id=?',(jid,)).fetchone()
     out={'job':jobrow(r,c=c)}

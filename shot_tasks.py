@@ -9,7 +9,7 @@ TABLE = """CREATE TABLE IF NOT EXISTS shot_tasks(
  job_id TEXT, epoch TEXT, ix INTEGER, state TEXT, helper TEXT, ticket TEXT,
  deadline INTEGER, size INTEGER, PRIMARY KEY(job_id, ix))"""
 TTL = 100
-MAX_HELPERS = fleet.MAX_CARDS-1
+MAX_HELPERS = fleet.MAX_JOB_CARDS-1
 
 def offer(c, job):
     # A new parent lease fences off results of an earlier attempt.
