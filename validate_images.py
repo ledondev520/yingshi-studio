@@ -1,4 +1,4 @@
-"""Image routing, Carbon validation and private PNG delivery without paid calls."""
+"""Image routing, Hydrogen validation and private PNG delivery without paid calls."""
 import io, json, tempfile, threading, urllib.request, urllib.error, uuid, zlib, struct
 from pathlib import Path
 from http.server import ThreadingHTTPServer
@@ -56,8 +56,8 @@ def run():
    for bad in ({},{'description':'茶馆','prompt':'short'},{'description':'茶馆','prompt':42}):
     try:validate(bad,'square')
     except ValueError:pass
-    else:raise AssertionError('Invalid Carbon output accepted')
-   print('PASS image create/idempotency, GPU/routing, PNG validation, visitor isolation, watch access, Carbon schema')
+    else:raise AssertionError('Invalid Hydrogen output accepted')
+   print('PASS image create/idempotency, GPU/routing, PNG validation, visitor isolation, watch access, Hydrogen schema')
   finally:http.shutdown();http.server_close()
 
 if __name__=='__main__':run()

@@ -104,9 +104,9 @@ def worker_status(wr,c=None):
 def cleanup(c):
  fleet.requeue_expired(c,now())
 plan_wake=threading.Event()
-def run_planner():
+def run_planner(images=False):
  while True:
-  with db() as c:r=c.execute("SELECT id,prompt,seconds,precision,quality,audio_mode,aspect FROM jobs WHERE state='planning' ORDER BY created,rowid LIMIT 1").fetchone()
+  with db() as c:r=c.execute("SELECT id,prompt,seconds,precision,quality,audio_mode,aspect FROM jobs WHERE state='planning' AND (COALESCE(precision,'quantized')='image-bf16')=? ORDER BY created,rowid LIMIT 1",(images,)).fetchone()
   if not r:
    plan_wake.wait(2);plan_wake.clear();continue
   start=time.monotonic(); first=None; last=0
@@ -116,9 +116,11 @@ def run_planner():
    if first is None:first=round(t-start,3)
    if t-last<.30:return
    last=t
-   with db() as c:c.execute("UPDATE jobs SET shots=?,updated=?,message=? WHERE id=? AND state='planning'",(pack([{'prompt':x,'seconds':0} for x in parts]),now(),'正在写第 '+str(len(parts))+' 段分镜',r['id']))
+   shots=[{'prompt':parts[0],'h3_prompt':parts[1] if len(parts)>1 else '','seconds':0}] if images else [{'prompt':x,'seconds':0} for x in parts]
+   message=('正在扩写生图提示词' if len(parts)>1 else '正在写画面描述') if images else '正在写第 '+str(len(parts))+' 段分镜'
+   with db() as c:c.execute("UPDATE jobs SET shots=?,updated=?,message=? WHERE id=? AND state='planning'",(pack(shots),now(),message,r['id']))
   try:
-   result=image_director.plan(dict(r),KEYS,fail) if r['precision']=='image-bf16' else director.plan(dict(r),KEYS,fail,progress)
+   result=image_director.plan(dict(r),KEYS,fail,progress) if images else director.plan(dict(r),KEYS,fail,progress)
    qual='hd' if r['precision']=='bf16' else (r['quality'] or result['quality'])
    with db() as c:c.execute("UPDATE jobs SET shots=?,quality=?,audio_mode=COALESCE(audio_mode,'auto'),route=?,director_model=?,state='queued',updated=?,message='创作描述已完成，等待 GPU' WHERE id=? AND state='planning'",(pack(result['shots']),qual,result['route'],result['model'],now(),r['id']))
    print('director model=%s first_s=%s total_s=%.3f shots=%d'%(result['model'],first,time.monotonic()-start,len(result['shots'])),flush=True)
@@ -439,7 +441,8 @@ class Handler(BaseHTTPRequestHandler):
  do_GET=do_POST=do_HEAD=do_PUT=handle_req
 if __name__=='__main__':
  import signal
- setup();threading.Thread(target=run_planner,daemon=True).start()
+ setup()
+ for images in (False,True):threading.Thread(target=run_planner,args=(images,),daemon=True).start()
  threading.Thread(target=media.run_previews,args=(DATA,db),daemon=True).start()
  srv=ThreadingHTTPServer(('127.0.0.1',PORT),Handler)
  for sig in (signal.SIGTERM,signal.SIGINT):

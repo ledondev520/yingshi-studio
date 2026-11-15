@@ -36,7 +36,7 @@ function paintMode(){
  const image=creationKind==='image';$('promptMeta').textContent=image?'主体 · 构图 · 光线 · 风格':'画面 · 动作 · 声音 · 对白';$('videoModels').hidden=image;$('videoDuration').hidden=image;$('imageCanvas').hidden=!image;
  for(const el of document.querySelectorAll('[name=creationKind]'))el.checked=el.value===creationKind;
  for(const el of document.querySelectorAll('[name=imageAspect]'))el.checked=el.value===imageAspect;
- const hint=$('qualityHint');if(hint)hint.textContent=image?'Carbon 扩写画面描述，H3-Image 生成图片。首次准备模型需要较长时间。':modelMode==='bf16'?'原生 768p，可在创意里写明画幅、对白和声音。':'默认短边 768 像素。可在创意里写「竖屏」「快速预览」或「保留原声」。';
+ const hint=$('qualityHint');if(hint)hint.textContent=image?'Hydrogen 扩写画面描述，H3-Image 生成图片。首次准备模型需要较长时间。':modelMode==='bf16'?'原生 768p，可在创意里写明画幅、对白和声音。':'默认短边 768 像素。可在创意里写「竖屏」「快速预览」或「保留原声」。';
  $('modelWorker').hidden=role!=='owner';$('modelWorker').href=modelMode==='bf16'?'colab-worker-bf16.ipynb':'colab-worker.ipynb';
  for(const el of document.querySelectorAll('[name=modelPrecision]'))el.checked=el.value===modelMode;
  $('modelNote').textContent=(modelMode==='bf16'?'使用官方原始权重，耗时较长。':'量化权重，出片较快。')+(onlineModes&&!onlineModes.includes(modelMode)?'对应工作端离线，提交后后台会申请 GPU。':'');
@@ -48,14 +48,14 @@ function durations(){$('duration').value=duration;$('durationText').textContent=
 function renderShots(j){
  const c=$('shots');c.replaceChildren();const view=j?.shots||[];const writing=j?.state==='planning',image=j?j.kind==='image':creationKind==='image';
  $('boardHeading').textContent=image?'画面设计':'分镜脚本';
- $('shotLabel').textContent=writing?(image?'Carbon 构思中':'导演编排中'):view.length?(image?'画面描述已就绪':view.length+' 段 · '+j.seconds+' 秒'):'等待创意';
+ $('shotLabel').textContent=writing?(image?'Hydrogen 构思中':'导演编排中'):view.length?(image?'画面描述已就绪':view.length+' 段 · '+j.seconds+' 秒'):'等待创意';
  $('shotHint').textContent=j?.state==='failed'?j.message:writing?(image?'正在扩写构图、光线、材质和细节。':'写好的内容会逐段出现。'):view.length?(image?'画面设计与完整生图提示词已保存。':'分镜已保存，可在任务记录中查看。'):(image?'提交简短创意，AI 会补充完整画面描述。':'提交后，分镜会在这里逐段出现。');
  const cuts=view.filter((shot,i)=>i>0&&shot.cut===true).length;
  if(!writing&&['queued','running'].includes(j?.state)&&j.route!=='continuous'&&view.length>=3&&cuts){
    $('shotHint').textContent='有 '+cuts+' 个独立切镜可提前生成，空闲显卡会自动接手。';
  }
  if(j?.state==='running'&&j.sampling?.length){const s=j.sampling[0];$('shotHint').textContent='第 '+s.shot+' 镜 · 最近实测 '+s.done+'/'+s.total+' 步。各镜的速度与预计耗时见下方任务记录。'}
- for(const [i,shot] of view.entries()){const n=tx('div','','shot'),box=tx('div','');box.append(tx('label',image?'画面描述':'分镜 '+(i+1)+(shot.seconds?' · '+shot.seconds+' 秒':'')),tx('p',shot.prompt));if(image&&shot.h3_prompt){const details=document.createElement('details');details.append(tx('summary','查看完整生图提示词'),tx('p',shot.h3_prompt));box.append(details)}n.append(tx('span',String(i+1).padStart(2,'0')),box);c.append(n)}
+ for(const [i,shot] of view.entries()){const n=tx('div','','shot'),box=tx('div','');box.append(tx('label',image?'画面描述':'分镜 '+(i+1)+(shot.seconds?' · '+shot.seconds+' 秒':'')),tx('p',shot.prompt));if(image&&shot.h3_prompt){const details=document.createElement('details');details.open=writing;details.append(tx('summary',writing?'生图提示词 · 正在生成':'查看完整生图提示词'),tx('p',shot.h3_prompt));box.append(details)}n.append(tx('span',String(i+1).padStart(2,'0')),box);c.append(n)}
 }
 async function watchJob(j){
  const ticket=++watchToken;activeJob=j.id;rememberJobs([j]);renderShots(j);
