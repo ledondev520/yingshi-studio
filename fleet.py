@@ -30,7 +30,7 @@ def _compatible(wr,j):
         (not tot or tot==j['seconds'] or bool(wr['append_ok'])))
 def need(c,t):
     workers=_live_workers(c,t)
-    jobs=list(c.execute("select * from jobs where state in ('queued','running') order by case state when 'running' then 0 else 1 end,created,rowid"))
+    jobs=list(c.execute("select * from jobs where state in ('planning','queued','running') order by case state when 'running' then 0 else 1 end,created,rowid"))
     tasks={}
     for s in c.execute("""select s.* from shot_tasks s join jobs j on j.id=s.job_id and j.lease=s.epoch where j.state='running'"""):
         tasks.setdefault(s['job_id'],[]).append(s)
@@ -41,10 +41,11 @@ def need(c,t):
     for j in jobs:
         mode=j['precision'] or 'quantized'
         avail=sorted((w for w in idle if _compatible(workers[w],j)),key=lambda w:(not workers[w]['relay'],w))
-        if j['state']=='queued':
+        if j['state'] in ('planning','queued'):
             owner=avail.pop(0) if avail else None
             if owner:idle.remove(owner)
             else:missing.append(mode)
+            if j['state']=='planning':continue
             saved={r[0] for r in c.execute('SELECT ix FROM shot_checkpoints WHERE job=? AND spec=?',(j['id'],checkpoints.spec(j)))}
             count=min(MAX_JOB_CARDS-1,len(set(cuts(json.loads(j['shots']),j['route']))-saved))
         else:
@@ -69,13 +70,20 @@ def cluster_summary(c,t):
     workers=_live_workers(c,t)
     running=c.execute("SELECT COUNT(*) FROM jobs WHERE state='running'").fetchone()[0]
     queued=c.execute("SELECT COUNT(*) FROM jobs WHERE state IN ('planning','queued')").fetchone()[0]
-    return {'online_count':len(workers),'running_jobs':running,'queued_jobs':queued}
+    live_devices={device(w) for w in workers}
+    signals=[r for r in c.execute('SELECT device,stage FROM pool_signal WHERE until>?',(t,)) if r['device'] not in live_devices]
+    return {'online_count':len(workers),'running_jobs':running,'queued_jobs':queued,
+            'loading_count':sum(r['stage']=='loading' for r in signals),
+            'requesting_count':sum(r['stage']=='request' for r in signals),
+            'runtime_limit':any(r['stage']=='limit' for r in signals)}
 
 def wait_message(c,mode,t,job=None):
     labels={r[0] for r in c.execute('select stage from pool_signal where mode=? and until>?',(mode,t))}
     workers=_live_workers(c,t)
     pos=queue_position(c,job,t) if job is not None else None
     prefix=f'队列第 {pos} 位 · ' if pos else ''
+    if 'limit' in labels and 'loading' not in labels:
+        return prefix+'Google 当前活动运行时已达上限，等待现有卡空闲或名额释放；任务已保存'
     compat=[w for w in workers.values() if (_compatible(w,job) if job is not None else w['mode']==mode)]
     if compat:
         busy_ids={r[0] for r in c.execute("SELECT wid FROM jobs WHERE state='running' AND wid IS NOT NULL")}

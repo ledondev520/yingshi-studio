@@ -2,6 +2,7 @@
 import shutil
 import threading
 import media
+import model_cache
 import checkpoints
 import director
 import image_director
@@ -173,6 +174,8 @@ class Handler(BaseHTTPRequestHandler):
  def dispatch(self):
   parts=urlsplit(self.path);p=parts.path;qs=parse_qs(parts.query)
   qtoken=(qs.get('token') or [self.headers.get('X-H3-Watch-Token','')])[0]
+  cache=re.fullmatch(r'/api/worker/model-cache/([0-9a-f]{64})',p)
+  if cache and self.command=='GET':return model_cache.serve(self,cache[1],fail)
   m=re.fullmatch(r'/api/media/([A-Za-z0-9_-]{1,120})',p)
   if m and self.command in ('GET','HEAD'):return media.serve(self,m[1],DATA,db,fail,watch_ok=valid_watch(m[1],qtoken),download=qs.get('download')==['1'])
   m=re.fullmatch(r'/api/preview/([A-Za-z0-9_-]{1,120})',p)

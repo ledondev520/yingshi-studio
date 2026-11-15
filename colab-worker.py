@@ -243,7 +243,7 @@ else:
         if path.is_file() and path.stat().st_size == size:
             print('复用：', name)
             continue
-        hf_hub_download(repo_id='Comfy-Org/MiniMax-H3', revision='54472221d27c695fca9621b0c3ed52f06c4af707', filename=name, local_dir=str(models), force_download=path.exists())
+        hf_hub_download(repo_id='Comfy-Org/MiniMax-H3', revision='54472221d27c695fca9621b0c3ed52f06c4af707', filename=name, local_dir=str(models), force_download=path.exists(), token=False)
         assert path.stat().st_size == size, name
     print('四个文件已就绪')
     import time, requests
@@ -398,7 +398,7 @@ def _render_piece(job,ix,path,piece,previous,update):
         cached=models/'loras'/fname
         if not cached.exists() or cached.stat().st_size!=1956193000:
             update('running',pct,'首次准备快速预览组件（约 1.96 GB）')
-            hf_hub_download(repo_id='lightx2v/Minimax-h3-Turbo',revision='30f485ed874aa44c8183348ad361c5eabad318da',filename=fname,local_dir=str(cached.parent),force_download=cached.exists())
+            hf_hub_download(repo_id='lightx2v/Minimax-h3-Turbo',revision='30f485ed874aa44c8183348ad361c5eabad318da',filename=fname,local_dir=str(cached.parent),force_download=cached.exists(),token=False)
         if not link.exists():link.symlink_to(cached)
         g['turbo']={'class_type':'LoraLoaderModelOnly','inputs':{'model':['140:127',0],'strength_model':1.0,'lora_name':fname}}
         g['140:124']['inputs'].update(model=['turbo',0],steps=8)
