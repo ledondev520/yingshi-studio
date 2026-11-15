@@ -13,7 +13,7 @@ let parentId = '';
 let duration = 15;
 let jobs = [];
 let jobTotals = null;
-const PAGE_SIZE = 5;
+const PAGE_SIZE = 8;
 let workKind = 'video';
 let workKindInitialized = false;
 const filters = { video: 'all', image: 'all' };
@@ -48,6 +48,9 @@ function snapDuration(v) {
 
 const openShotJobs = new Set();
 const openPromptJobs = new Set();
+const openFailedSections = new Set();
+const rerunningJobs = new Set();
+let jobsMsgTimer = null;
 let boardJob = null;
 let boardJobId = '';
 let boardManual = null; // null | 'open' | 'closed'
@@ -190,9 +193,6 @@ function paintMode() {
       ? '写下简短画面想法即可，系统会自动补全构图与光影细节。'
       : '量化加速 · 默认 768p。可写明「竖屏」「快速预览」或「保留原声」。' + wake;
   }
-
-  $('modelWorker').hidden = role !== 'owner' || image;
-  $('modelWorker').href = 'colab-worker.ipynb';
 }
 
 function durations() {
@@ -217,6 +217,18 @@ function showFormMsg(text, autoHideMs = 0) {
   if (text && autoHideMs > 0) {
     msgTimer = setTimeout(() => {
       if ($('workMsg').textContent === text) $('workMsg').textContent = '';
+    }, autoHideMs);
+  }
+}
+
+function showJobsMsg(text, autoHideMs = 4500) {
+  const el = $('jobsMsg');
+  if (!el) return;
+  clearTimeout(jobsMsgTimer);
+  el.textContent = text || '';
+  if (text && autoHideMs > 0) {
+    jobsMsgTimer = setTimeout(() => {
+      if (el.textContent === text) el.textContent = '';
     }, autoHideMs);
   }
 }
@@ -581,6 +593,10 @@ function isActiveState(state) {
   return ['planning', 'queued', 'running'].includes(state);
 }
 
+function isFailedState(state) {
+  return state === 'failed' || state === 'cancelled';
+}
+
 function setWorkKind(next, persist = true) {
   workKind = next === 'image' ? 'image' : 'video';
   workKindInitialized = true;
@@ -588,8 +604,12 @@ function setWorkKind(next, persist = true) {
 }
 
 function updateWorkSwitch(videoJobs, imageJobs) {
-  const vTotal = Math.max(videoJobs.length, Number(jobTotals?.video) || 0);
-  const iTotal = Math.max(imageJobs.length, Number(jobTotals?.image) || 0);
+  const vFailed = videoJobs.filter(j => isFailedState(j.state)).length;
+  const iFailed = imageJobs.filter(j => isFailedState(j.state)).length;
+  const vValid = videoJobs.length - vFailed;
+  const iValid = imageJobs.length - iFailed;
+  const vTotal = Math.max(vValid, (Number(jobTotals?.video) || 0) - vFailed);
+  const iTotal = Math.max(iValid, (Number(jobTotals?.image) || 0) - iFailed);
   const vActive = videoJobs.filter(j => isActiveState(j.state)).length;
   const iActive = imageJobs.filter(j => isActiveState(j.state)).length;
 
@@ -752,6 +772,270 @@ function emptyLibraryText(isImage, curFilter) {
     : '还没有视频成片。在上方创作台选择「视频」写下创意，生成的短片会独立保存在这里。';
 }
 
+async function rerunJob(j) {
+  if (rerunningJobs.has(j.id)) return;
+  const k = jobKind(j);
+  const isImage = k === 'image';
+  const brief = (j.brief || j.prompt || '').trim();
+  if (!brief) return;
+  rerunningJobs.add(j.id);
+  renderJobs();
+  try {
+    const r = await api('create', {
+      prompt: brief,
+      kind: isImage ? 'image' : 'video',
+      aspect: isImage ? inferAspectFromJob(j) : 'landscape',
+      precision: modelMode,
+      seconds: isImage ? 0 : snapDuration(j.seconds),
+      parent: isImage ? '' : (j.parent || ''),
+      request_id: crypto.randomUUID()
+    });
+    rememberJobs([r.job]);
+    setWorkKind(k, true);
+    if (filters[k] === 'done') filters[k] = 'all';
+    pages[k] = 1;
+    boardManual = null;
+    showJobsMsg('已用相同创意重新发起任务，正在生成全新提示词…', 5000);
+    watchJob(r.job);
+    await refresh();
+    const newEl = document.querySelector(`[data-job-id="${r.job.id}"]`);
+    if (newEl) newEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  } catch (e) {
+    showJobsMsg(e.message, 5500);
+  } finally {
+    rerunningJobs.delete(j.id);
+    renderJobs();
+  }
+}
+
+function fillComposerFromJob(j) {
+  const isImage = jobKind(j) === 'image';
+  const brief = j.brief || j.prompt || '';
+  if ($('prompt').value.trim() && $('prompt').value !== brief && !confirm('要用这条任务的提示词替换当前输入框内容吗？')) return;
+  creationKind = isImage ? 'image' : 'video';
+  if (isImage) imageAspect = inferAspectFromJob(j);
+  setWorkKind(creationKind, true);
+  paintMode();
+  parentId = isImage ? '' : (j.parent || '');
+  paintReply();
+  if (!isImage) {
+    duration = snapDuration(j.seconds);
+    durations();
+  }
+  $('prompt').value = brief;
+  changed();
+  showFormMsg('已填入创意，可修改后重新提交。', 4000);
+  $('prompt').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  $('prompt').focus();
+}
+
+function buildJobCard(j) {
+  const isImage = jobKind(j) === 'image';
+  const failed = isFailedState(j.state);
+  const expanded = openShotJobs.has(j.id);
+  const card = tx('div', '', 'job' + (expanded ? ' isExpanded' : '') + (failed ? ' isFailed' : ''));
+  card.dataset.jobId = j.id;
+
+  // 1. Top row: state pill + timestamp
+  const head = tx('div', '', 'jobHead');
+  const pill = tx('span', j.recovering ? '自动恢复' : (states[j.state] || j.state), 'pill');
+  pill.dataset.state = j.recovering ? 'queued' : j.state;
+  head.append(pill, tx('span', detailDate(j.created), 'jobTime'));
+  card.append(head);
+
+  // 2. Compact spec row
+  const metaRow = tx('div', '', 'jobMetaRow');
+  if (!isImage && j.parent) metaRow.append(tx('span', '续拍', 'seqBadge'));
+  const specs = tx('span', '', 'specGroup');
+  const sh0 = j.shots?.[0];
+  const specItems = isImage
+    ? [
+        aspectLabels[inferAspectFromJob(j)] || '横图',
+        sh0?.width && sh0?.height && !isMobileViewport() ? `${sh0.width}×${sh0.height}` : ''
+      ].filter(Boolean)
+    : [
+        (j.total_seconds || j.seconds) + ' 秒',
+        j.shots?.length ? j.shots.length + ' 镜' : '',
+        j.precision === 'bf16' ? 'BF16' : '',
+        j.quality === 'fast' ? '快速预览' : ''
+      ].filter(Boolean);
+  for (const item of specItems) specs.append(tx('span', item, 'spec'));
+  metaRow.append(specs);
+  card.append(metaRow);
+
+  // 3. Prompt text (clamped to 2 lines, tap to expand/collapse)
+  const fullTitle = j.brief || j.prompt || '未命名创意';
+  const promptEl = tx('p', fullTitle, 'jobPrompt' + (openPromptJobs.has(j.id) ? ' isOpen' : ''));
+  promptEl.title = '点击展开或收起完整提示词';
+  promptEl.onclick = () => {
+    if (openPromptJobs.has(j.id)) openPromptJobs.delete(j.id);
+    else openPromptJobs.add(j.id);
+    promptEl.classList.toggle('isOpen');
+  };
+  card.append(promptEl);
+
+  // 4. Clean live progress / GPU preparation / status block
+  if (j.preparation?.length && !j.sampling?.length && j.state !== 'planning') {
+    preparationDetail(j.preparation, card);
+  } else {
+    const live = buildLiveBox(j);
+    if (live) card.append(live);
+  }
+
+  // 5. Optional inline storyboard / visual description view
+  if (expanded && j.shots?.length) {
+    const shotBox = tx('div', '', 'jobShots');
+    renderShotRows(shotBox, j.shots, isImage, j.state === 'planning');
+    card.append(shotBox);
+  }
+
+  // 6. Action buttons (anchored to card bottom)
+  const actions = tx('div', '', 'jobActions');
+
+  if (j.state === 'done') {
+    if (j.media_ready) {
+      const label = isImage ? '▶ 查看' : '▶ 播放';
+      const pb = tx('button', label, 'actBtn actPrimary');
+      pb.type = 'button';
+      pb.onclick = () => openPreview(j);
+      actions.append(pb);
+    }
+
+    const busy = rerunningJobs.has(j.id);
+    const rb = tx('button', busy ? '提交中…' : '重试', 'actBtn');
+    rb.type = 'button';
+    rb.disabled = busy;
+    rb.title = '使用相同创意，重新生成全新提示词再跑一遍';
+    rb.onclick = () => rerunJob(j);
+    actions.append(rb);
+
+    if (j.media_ready) {
+      const rawUrl = mediaUrl(j);
+      const dl = tx('a', isImage ? '下载' : '下载', 'actBtn');
+      dl.href = rawUrl + (rawUrl.includes('?') ? '&' : '?') + 'download=1';
+      dl.download = '映室-' + j.id.slice(0, 8) + (isImage ? '.png' : '.mp4');
+      actions.append(dl);
+    }
+
+    if (!isImage && j.media_ready) {
+      const seq = tx('button', '续拍', 'actBtn');
+      seq.type = 'button';
+      seq.onclick = () => {
+        if ($('prompt').value.trim() && $('prompt').value !== j.brief && !confirm('当前输入框已有内容，要清空并从这条成片结尾续拍吗？')) return;
+        creationKind = 'video';
+        setWorkKind('video', true);
+        paintMode();
+        parentId = j.id;
+        $('prompt').value = '';
+        paintReply();
+        changed();
+        showFormMsg('写下接下来发生什么，所选时长为新增片段长度。');
+        $('prompt').scrollIntoView({ behavior: 'smooth', block: 'center' });
+        $('prompt').focus();
+      };
+      actions.append(seq);
+    }
+  }
+
+  if (failed) {
+    const busy = rerunningJobs.has(j.id);
+    const rb = tx('button', busy ? '提交中…' : '重试', 'actBtn');
+    rb.type = 'button';
+    rb.disabled = busy;
+    rb.onclick = () => rerunJob(j);
+    actions.append(rb);
+
+    const retry = tx('button', '修改创意', 'actBtn');
+    retry.type = 'button';
+    retry.onclick = () => fillComposerFromJob(j);
+    actions.append(retry);
+  }
+
+  if (j.shots?.length) {
+    const btnText = isImage
+      ? (expanded ? '收起' : '描述')
+      : (expanded ? '收起' : `分镜(${j.shots.length})`);
+    const sb = tx('button', btnText, 'actBtn');
+    sb.type = 'button';
+    sb.onclick = () => {
+      if (openShotJobs.has(j.id)) openShotJobs.delete(j.id);
+      else openShotJobs.add(j.id);
+      renderJobs();
+    };
+    actions.append(sb);
+  }
+
+  if (j.state === 'queued') {
+    const cancelBtn = tx('button', '取消排队', 'actBtn');
+    cancelBtn.type = 'button';
+    cancelBtn.onclick = async () => {
+      try {
+        const tok = j.watch_token || jobToken(j.id);
+        await api('cancel', { id: j.id, ...(tok ? { watch_token: tok } : {}) });
+        await refresh();
+      } catch (e) {
+        showJobsMsg(e.message);
+      }
+    };
+    actions.append(cancelBtn);
+  }
+
+  const tok = j.watch_token || jobToken(j.id);
+  if (tok) {
+    const lk = tx('button', copiedJobId === j.id ? '已复制 ✓' : '分享', 'actBtn actSubtle');
+    lk.type = 'button';
+    lk.onclick = async () => {
+      const url = location.origin + location.pathname + '#job=' + j.id + '.' + tok;
+      try {
+        await navigator.clipboard.writeText(url);
+        copiedJobId = j.id;
+        lk.textContent = '已复制 ✓';
+        setTimeout(() => {
+          if (copiedJobId === j.id) copiedJobId = '';
+          lk.textContent = '分享';
+        }, 1600);
+      } catch {
+        showJobsMsg('分享链接：' + url, 8000);
+      }
+    };
+    actions.append(lk);
+  }
+
+  if (actions.childElementCount) card.append(actions);
+  return card;
+}
+
+function renderFailedDrawer(failedList) {
+  const wrap = $('failedWrap');
+  if (!wrap) return;
+  wrap.replaceChildren();
+  const curFilter = filters[workKind] || 'all';
+  if (curFilter !== 'all' || !failedList.length) return;
+
+  const details = document.createElement('details');
+  details.className = 'failedFold';
+  details.open = openFailedSections.has(workKind);
+
+  const summary = document.createElement('summary');
+  summary.className = 'failedSummary';
+  const sumLeft = tx('span', `未完成 / 失败记录 (${failedList.length})`);
+  const sumRight = tx('span', details.open ? '收起 ▴' : '展开 ▾', 'foldToggleText');
+  summary.append(sumLeft, sumRight);
+  details.append(summary);
+
+  const kindSnapshot = workKind;
+  details.ontoggle = () => {
+    if (details.open) openFailedSections.add(kindSnapshot);
+    else openFailedSections.delete(kindSnapshot);
+    sumRight.textContent = details.open ? '收起 ▴' : '展开 ▾';
+  };
+
+  const fGrid = tx('div', '', 'jobGrid failedGrid');
+  for (const j of failedList) fGrid.append(buildJobCard(j));
+  details.append(fGrid);
+  wrap.append(details);
+}
+
 function renderJobs() {
   const c = $('jobs');
   c.replaceChildren();
@@ -762,13 +1046,17 @@ function renderJobs() {
 
   const isImageView = workKind === 'image';
   const kindJobs = isImageView ? imageJobs : videoJobs;
-  updateFilterTabs(kindJobs);
+  const activeDone = kindJobs.filter(j => !isFailedState(j.state));
+  const failedList = kindJobs.filter(j => isFailedState(j.state));
+  updateFilterTabs(activeDone);
 
   const curFilter = filters[workKind] || 'all';
-  const seen = kindJobs.filter(j =>
+  const seen = activeDone.filter(j =>
     curFilter === 'all' ||
     (curFilter === 'active' ? isActiveState(j.state) : j.state === 'done')
   );
+
+  renderFailedDrawer(failedList);
 
   if (!seen.length) {
     renderPager(0, 1, 1, 0, 0);
@@ -783,179 +1071,7 @@ function renderJobs() {
   const pageItems = seen.slice(startIdx, startIdx + PAGE_SIZE);
 
   for (const j of pageItems) {
-    const isImage = jobKind(j) === 'image';
-    const card = tx('div', '', 'job');
-
-    // 1. Header row: state badge + clean media-specific specs + compact timestamp
-    const head = tx('div', '', 'jobHead');
-    const badges = tx('div', '', 'jobBadges');
-
-    const pill = tx('span', j.recovering ? '自动恢复' : (states[j.state] || j.state), 'pill');
-    pill.dataset.state = j.recovering ? 'queued' : j.state;
-    badges.append(pill);
-
-    if (!isImage && j.parent) badges.append(tx('span', '续拍', 'seqBadge'));
-
-    const specs = tx('span', '', 'specGroup');
-    const sh0 = j.shots?.[0];
-    const specItems = isImage
-      ? [
-          aspectLabels[inferAspectFromJob(j)] || '横图',
-          sh0?.width && sh0?.height ? `${sh0.width}×${sh0.height}` : ''
-        ].filter(Boolean)
-      : [
-          (j.total_seconds || j.seconds) + ' 秒',
-          j.shots?.length ? j.shots.length + ' 镜' : '',
-          j.precision === 'bf16' ? 'BF16' : '量化版',
-          j.quality === 'fast' ? '快速预览' : '768p'
-        ].filter(Boolean);
-    for (const item of specItems) specs.append(tx('span', item, 'spec'));
-    badges.append(specs);
-
-    head.append(badges, tx('span', detailDate(j.created), 'jobTime'));
-    card.append(head);
-
-    // 2. Prompt text (clamped to 2 lines, tap to expand/collapse)
-    const fullTitle = j.brief || j.prompt || '未命名创意';
-    const promptEl = tx('p', fullTitle, 'jobPrompt' + (openPromptJobs.has(j.id) ? ' isOpen' : ''));
-    promptEl.title = '点击展开或收起完整提示词';
-    promptEl.onclick = () => {
-      if (openPromptJobs.has(j.id)) openPromptJobs.delete(j.id);
-      else openPromptJobs.add(j.id);
-      promptEl.classList.toggle('isOpen');
-    };
-    card.append(promptEl);
-
-    // 3. Clean live progress / status block
-    if (j.preparation?.length && !j.sampling?.length && j.state !== 'planning') {
-      preparationDetail(j.preparation, card);
-    } else {
-      const live = buildLiveBox(j);
-      if (live) card.append(live);
-    }
-
-    // 4. Optional inline storyboard / visual description view
-    if (openShotJobs.has(j.id) && j.shots?.length) {
-      const shotBox = tx('div', '', 'jobShots');
-      renderShotRows(shotBox, j.shots, isImage, j.state === 'planning');
-      card.append(shotBox);
-    }
-
-    // 5. Action buttons
-    const actions = tx('div', '', 'jobActions');
-
-    if (j.state === 'done' && j.media_ready) {
-      const label = isImage
-        ? '查看图片'
-        : (j.preview_status === 'ready' ? '▶ 播放预览' : '▶ 查看成片');
-      const pb = tx('button', label, 'actBtn actPrimary');
-      pb.type = 'button';
-      pb.onclick = () => openPreview(j);
-      actions.append(pb);
-
-      const rawUrl = mediaUrl(j);
-      const dl = tx('a', isImage ? '下载原图' : '下载原片', 'actBtn');
-      dl.href = rawUrl + (rawUrl.includes('?') ? '&' : '?') + 'download=1';
-      dl.download = '映室-' + j.id.slice(0, 8) + (isImage ? '.png' : '.mp4');
-      actions.append(dl);
-
-      if (!isImage) {
-        const seq = tx('button', '接着续拍', 'actBtn');
-        seq.type = 'button';
-        seq.onclick = () => {
-          if ($('prompt').value.trim() && $('prompt').value !== j.brief && !confirm('当前输入框已有内容，要清空并从这条成片结尾续拍吗？')) return;
-          creationKind = 'video';
-          setWorkKind('video', true);
-          paintMode();
-          parentId = j.id;
-          $('prompt').value = '';
-          paintReply();
-          changed();
-          showFormMsg('写下接下来发生什么，所选时长为新增片段长度。');
-          $('prompt').scrollIntoView({ behavior: 'smooth', block: 'center' });
-          $('prompt').focus();
-        };
-        actions.append(seq);
-      }
-    }
-
-    if (j.state === 'failed' || j.state === 'cancelled') {
-      const retry = tx('button', '修改创意', 'actBtn');
-      retry.type = 'button';
-      retry.onclick = () => {
-        if ($('prompt').value.trim() && $('prompt').value !== (j.brief || j.prompt) && !confirm('要用这条任务的提示词替换当前输入框内容吗？')) return;
-        creationKind = isImage ? 'image' : 'video';
-        if (isImage) imageAspect = inferAspectFromJob(j);
-        setWorkKind(creationKind, true);
-        paintMode();
-        parentId = isImage ? '' : (j.parent || '');
-        paintReply();
-        if (!isImage) {
-          duration = snapDuration(j.seconds);
-          durations();
-        }
-        $('prompt').value = j.brief || j.prompt || '';
-        changed();
-        showFormMsg('已恢复提示词，可直接修改或重新提交。', 4000);
-        $('prompt').scrollIntoView({ behavior: 'smooth', block: 'center' });
-        $('prompt').focus();
-      };
-      actions.append(retry);
-    }
-
-    if (j.shots?.length) {
-      const isOpen = openShotJobs.has(j.id);
-      const btnText = isImage
-        ? (isOpen ? '收起描述' : '查看描述')
-        : (isOpen ? '收起分镜' : `分镜 (${j.shots.length})`);
-      const sb = tx('button', btnText, 'actBtn');
-      sb.type = 'button';
-      sb.onclick = () => {
-        if (openShotJobs.has(j.id)) openShotJobs.delete(j.id);
-        else openShotJobs.add(j.id);
-        renderJobs();
-      };
-      actions.append(sb);
-    }
-
-    if (j.state === 'queued') {
-      const cancelBtn = tx('button', '取消排队', 'actBtn');
-      cancelBtn.type = 'button';
-      cancelBtn.onclick = async () => {
-        try {
-          const tok = j.watch_token || jobToken(j.id);
-          await api('cancel', { id: j.id, ...(tok ? { watch_token: tok } : {}) });
-          await refresh();
-        } catch (e) {
-          showFormMsg(e.message);
-        }
-      };
-      actions.append(cancelBtn);
-    }
-
-    const tok = j.watch_token || jobToken(j.id);
-    if (tok) {
-      const lk = tx('button', copiedJobId === j.id ? '已复制 ✓' : '分享', 'actBtn actSubtle');
-      lk.type = 'button';
-      lk.onclick = async () => {
-        const url = location.origin + location.pathname + '#job=' + j.id + '.' + tok;
-        try {
-          await navigator.clipboard.writeText(url);
-          copiedJobId = j.id;
-          lk.textContent = '已复制 ✓';
-          setTimeout(() => {
-            if (copiedJobId === j.id) copiedJobId = '';
-            lk.textContent = '分享';
-          }, 1600);
-        } catch {
-          showFormMsg('分享链接：' + url);
-        }
-      };
-      actions.append(lk);
-    }
-
-    if (actions.childElementCount) card.append(actions);
-    c.append(card);
+    c.append(buildJobCard(j));
   }
 
   renderPager(seen.length, page, totalPages, startIdx, pageItems.length);
@@ -1005,8 +1121,12 @@ async function refresh(first = false) {
         const k = jobKind(target);
         setWorkKind(k, true);
         filters[k] = 'all';
-        const idx = jobs.filter(j => jobKind(j) === k).findIndex(j => j.id === target.id);
-        pages[k] = idx >= 0 ? Math.floor(idx / PAGE_SIZE) + 1 : 1;
+        if (isFailedState(target.state)) {
+          openFailedSections.add(k);
+        } else {
+          const idx = jobs.filter(j => jobKind(j) === k && !isFailedState(j.state)).findIndex(j => j.id === target.id);
+          pages[k] = idx >= 0 ? Math.floor(idx / PAGE_SIZE) + 1 : 1;
+        }
       }
     }
 
