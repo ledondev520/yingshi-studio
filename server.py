@@ -425,4 +425,10 @@ class Handler(BaseHTTPRequestHandler):
    print('request failed:',type(e).__name__,flush=True);self.send(500,{'error':'暂时无法处理'})
  do_GET=do_POST=do_HEAD=do_PUT=handle_req
 if __name__=='__main__':
- setup();threading.Thread(target=media.run_previews,args=(DATA,db),daemon=True).start();threading.Thread(target=run_planner,daemon=True).start();ThreadingHTTPServer(('127.0.0.1',PORT),Handler).serve_forever()
+ import signal
+ setup();threading.Thread(target=run_planner,daemon=True).start()
+ threading.Thread(target=media.run_previews,args=(DATA,db),daemon=True).start()
+ srv=ThreadingHTTPServer(('127.0.0.1',PORT),Handler)
+ for sig in (signal.SIGTERM,signal.SIGINT):
+  signal.signal(sig,lambda *_:threading.Thread(target=srv.shutdown,daemon=True).start())
+ srv.serve_forever();srv.server_close()
