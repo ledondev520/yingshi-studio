@@ -53,6 +53,13 @@ def run():
    req('preview/'+job['id'],cookie=cookie,status=409)
    downloaded,head=req('media/'+job['id']+'?download=1',cookie=cookie)
    assert downloaded==png and '.png' in head['Content-Disposition']
+   with server.db() as c:
+    vis=c.execute('SELECT visitor FROM jobs WHERE id=?',(j['id'],)).fetchone()[0]
+    for i in range(95):
+     c.execute("INSERT INTO jobs(id,visitor,brief,prompt,seconds,state,shots,precision,created,updated) VALUES(?,?,?,?,15,'done','[]','quantized',?,?)",(f'vid-{i:03d}',vis,f'视频 {i}',f'视频 {i}',server.now()+i+10,server.now()+i+10))
+   st=req('state',cookie=cookie)[0]
+   assert st['job_totals']=={'video':95,'image':1},st['job_totals']
+   assert any(x['id']==j['id'] and x['kind']=='image' for x in st['jobs']),'Video jobs must never crowd out image jobs'
    from image_director import validate
    for aspect,size in {'landscape':(2048,1536),'portrait':(1536,2048),'square':(2048,2048)}.items():
     shot=validate({'description':'茶馆','prompt':'A detailed visual scene. '*15},aspect)['shots'][0]
@@ -61,7 +68,7 @@ def run():
     try:validate(bad,'square')
     except ValueError:pass
     else:raise AssertionError('Invalid Hydrogen output accepted')
-   print('PASS image create/idempotency, GPU/routing, PNG validation, visitor isolation, watch access, Hydrogen schema')
+   print('PASS image create/idempotency, GPU/routing, PNG validation, visitor isolation, watch access, independent media quotas, Hydrogen schema')
   finally:http.shutdown();http.server_close()
 
 if __name__=='__main__':run()
