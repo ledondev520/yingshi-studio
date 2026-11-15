@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Verify worker artifacts are synchronized
+        run: |
+          python3 build_workers.py
+          python3 autowake/build_worker.py colab-worker.py autowake/cold-worker.py
+          python3 autowake/build_worker.py colab-worker.py autowake/cold-bf16.py h3_bf16.py
+          git diff --exit-code colab-worker.ipynb colab-worker-bf16.ipynb autowake/cold-worker.py autowake/cold-bf16.py
+      - name: Run studio validation suite
+        run: |
+          node --check app.js
+          python3 validate_pool.py
+          python3 validate_scale.py
+          python3 validate_launch.py
+          python3 validate_multiuser.py
+          python3 validate_worker_loop.py
+          python3 - <<'PY'
+          import pathlib
+          def box(t, b): return (len(b) + 8).to_bytes(4, 'big') + t + b
+          mp4 = box(b'ftyp', b'isom\x00\x00\x02\x00') + box(b'moov', box(b'trak', box(b'mdia', box(b'hdlr', b'\x00'*8 + b'vide' + b'\x00'*12)))) + box(b'mdat', b'\x00'*16)
+          pathlib.Path('/tmp/valid.mp4').write_bytes(mp4)
+          PY
+          python3 validate_relay.py /tmp/valid.mp4
+          python3 validate_resume.py /tmp/valid.mp4
+          python3 validate_deploy.py
+      - name: Run autowake controller checks
+        run: |
+          python3 - <<'PY'
+          import sys, types
+          from enum import Enum
+          for mod in ('requests', 'google', 'google.auth', 'google.auth.transport', 'google.auth.transport.requests', 'google.oauth2', 'google.oauth2.credentials', 'colab_cli', 'colab_cli.client', 'colab_cli.state'):
+              sys.modules[mod] = types.ModuleType(mod)
+          sys.modules['requests'].HTTPError = Exception
+          sys.modules['google.auth.transport.requests'].AuthorizedSession = object
+          sys.modules['google.oauth2.credentials'].Credentials = object
+          class Variant(Enum): GPU = 'GPU'
+          class Accelerator(Enum): A100 = 'A100'; H100 = 'H100'; G4 = 'G4'
+          sys.modules['colab_cli.client'].Variant = Variant
+          sys.modules['colab_cli.client'].Accelerator = Accelerator
+          sys.modules['colab_cli.state'].StateStore = object
+          sys.modules['colab_cli.state'].SessionState = object
+          sys.path.insert(0, 'autowake')
+          import check
+          check.run()
+          check.multiuser_pool()
+          PY

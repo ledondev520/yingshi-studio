@@ -1,0 +1,9 @@
+[Unit]
+Description=Yingshi H3 Studio zero-downtime auto-deploy from GitHub main
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/h3-studio-deploy
+ExecStart=/usr/local/sbin/h3-studio-auto-deploy

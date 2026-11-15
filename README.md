@@ -46,10 +46,11 @@ python3 server.py
 
 实际生成还需要：
 
-- 在 `director.py` 中将 `YOUR_GOOGLE_CLOUD_PROJECT` 设置为自己的项目，并在 `STUDIO_KEYS/vertex-api-key` 中保存凭证。密钥只供后端读取。
+- 在 `/etc/h3-studio/gcp-project`（或环境变量 `H3_GCP_PROJECT`）中配置 Vertex 项目 ID，并在 `STUDIO_KEYS/vertex-api-key` 中保存凭证（兼容直接修改 `director.py`）。密钥只供后端读取。
 - 按实际站点配置 `STUDIO_ORIGIN`、Nginx 和工作端中的 `BASE`。源码保留了原站点的公开域名，复用时请改为自己的域名。
 - 使用具有足够显存、模型访问权限及配额的 GPU，运行 `colab-worker.ipynb`（量化）或 `colab-worker-bf16.ipynb`（原始 BF16），完成设备配对。
-- 自动唤醒是可选部署组件，需要单独配置 `google-auth`、`colab_cli`、OAuth 登录及其运行环境；`autowake/colab_rest.py` 的项目占位符也需替换。仓库不包含这些登录数据。
+- 自动唤醒是可选部署组件，需要单独配置 `google-auth`、`colab_cli`、OAuth 登录及其运行环境；Colab 配额项目 ID 可保存在 `/etc/h3-studio/colab-project`（或 `H3_COLAB_PROJECT`）。仓库不包含这些登录数据。
+- 若需让线上服务器自动跟踪 `main` 分支无损热更，可在服务器上运行一次 `sudo bash deploy/install.sh`：脚本会自动保留现有 GCP 项目配置、在切换 `/opt/h3-studio/current` 软链前执行本地校验并等待编排中任务完成，若健康检查未通过则自动回滚。
 
 没有附带数据库、用户任务、视频、模型权重、API 密钥、OAuth token 或私有部署脚本。不要将这些文件提交到仓库。
 
