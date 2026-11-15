@@ -1,0 +1,20 @@
+[Unit]
+Description=Withkeya MiniMax H3 private video workbench
+After=network.target
+[Service]
+User=h3-studio
+Group=h3-studio
+WorkingDirectory=/opt/h3-studio/current
+ExecStart=/usr/bin/python3 -B /opt/h3-studio/current/server.py
+Restart=on-failure
+RestartSec=3
+StateDirectory=h3-studio
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+RestrictAddressFamilies=AF_INET AF_UNIX
+[Install]
+WantedBy=multi-user.target

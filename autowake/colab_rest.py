@@ -1,0 +1,61 @@
+"""Consumer Colab's public, scoped REST API; no browser cookies."""
+import time,uuid,requests,base64
+from pathlib import Path
+from urllib.parse import quote
+from datetime import datetime
+from types import SimpleNamespace as NS
+HOST='https://colaboratory.googleapis.com/'
+PROJECT='YOUR_GOOGLE_CLOUD_PROJECT'
+class Capacity(Exception):pass
+def wrap(x):
+    info=x.get('connectionInfo') or {};expiry=info.get('expireTime')
+    return NS(endpoint=x['name'],accelerator=NS(value=x['runtimeSpec']['accelerator']),runtime_proxy_info=NS(url=info.get('url',''),token=info.get('token',''),expires_at=lambda:datetime.fromisoformat(expiry.replace('Z','+00:00'))))
+class PublicColab:
+    def __init__(self,auth):self.s=auth
+    def req(self,method,path,**kw):
+        r=self.s.request(method,HOST+path,timeout=35,**kw);r.raise_for_status();return r.json()
+    def list_assignments(self):
+        return [wrap(x) for x in self.req('GET','v1beta/runtimes').get('runtimes',[])]
+    def get(self,name):return wrap(self.req('GET','v1beta/'+name))
+    def op(self,op):
+        for _ in range(120):
+            if op.get('done'):return op
+            time.sleep(2);op=self.req('GET','v1/'+op['name'])
+        raise TimeoutError('Google allocation pending')
+    def assign(self,stable,variant,model,highmem=False):
+        name='h3-'+stable.hex[:24]
+        try:return self.get('runtimes/'+name)
+        except requests.HTTPError as e:
+            if e.response.status_code!=404:raise
+        for shape in (('SHAPE_HIGHMEM',) if highmem and model.value=='A100' else (('SHAPE_STANDARD','SHAPE_HIGHMEM') if model.value=='A100' else ('SHAPE_STANDARD',))):
+            spec={'variant':'VARIANT_GPU','accelerator':model.value,'shape':shape}
+            try:
+                op=self.op(self.req('POST','v1beta/runtimes',params={'runtimeId':name,'requestId':str(uuid.uuid4())},json={'runtimeSpec':spec}))
+            except requests.HTTPError as e:
+                if e.response.status_code not in (400,412,429,503):raise
+                if model.value=='A100' and shape=='SHAPE_STANDARD':continue
+                raise Capacity('HTTP '+str(e.response.status_code)) from e
+            if op.get('error'):
+                err=op['error']
+                if err['code']==6:return self.get('runtimes/'+name)
+                if err['code'] in (8,9):
+                    reason=next((x.get('reason') for x in err.get('details',[]) if x.get('reason')),str(err['code']))
+                    print('Colab',model.value,'allocation refused:',reason,str(err.get('message',''))[:180],flush=True)
+                    if model.value=='A100' and shape=='SHAPE_STANDARD' and reason=='NO_RUNTIMES':continue
+                    raise Capacity(reason)
+                raise RuntimeError('Colab allocation: '+str(err['code']))
+            return self.get('runtimes/'+name)
+    def unassign(self,name):
+        op=self.op(self.req('DELETE','v1beta/'+name,params={'allowMissing':'true'}))
+        if op.get('error'):raise RuntimeError('Colab release failed')
+        return op
+
+class RuntimeFiles:
+    def __init__(self,state):
+        self.url=state.url.rstrip('/')
+        self.headers={'X-Colab-Runtime-Proxy-Token':state.token}
+    def upload(self,local,name):
+        remote='content/'+name
+        body={'type':'file','format':'base64','content':base64.b64encode(Path(local).read_bytes()).decode()}
+        r=requests.put(self.url+'/api/contents/'+quote(remote,safe='/'),headers=self.headers,json=body,timeout=(10,45),allow_redirects=False)
+        r.raise_for_status()

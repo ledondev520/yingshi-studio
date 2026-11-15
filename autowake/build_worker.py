@@ -1,0 +1,54 @@
+"""Adapt a deployed H3 worker for a disposable, noninteractive Colab VM."""
+from pathlib import Path
+import sys
+def build(s):
+    a=s.index('from google.colab import drive');b=s.index('PRECISION=globals()',a) if 'PRECISION=globals()' in s[a:] else s.index('from huggingface_hub import hf_hub_download',a)
+    s=s[:a]+'''import fcntl
+_managed_lock=open('/content/h3-managed.lock','a')
+fcntl.flock(_managed_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+def exchange(name):
+    return next((p/name for p in (Path('/content'),Path('/'),Path.cwd()) if (p/name).is_file()),None)
+config=json.loads(exchange('h3managedidentity.json').read_text())
+token=config['worker_key'];did=config['worker_id'];BASE='https://withkeya.com/h3-studio'
+gpu_present=subprocess.check_output(['nvidia-smi','--query-gpu=name','--format=csv,noheader'],text=True).strip()
+if not re.search(r'\\b(?:[AH]100|G4|RTX\\s+PRO\\s+6000\\s+Blackwell)\\b',gpu_present): raise RuntimeError('unsupported GPU')
+ROOT=root=Path('/content/h3-managed-data');root.mkdir(exist_ok=True)
+models, videos=root/'models', root/'videos'
+mounted=Path('/content/drive/MyDrive/MiniMax-H3/models')
+if mounted.is_dir():models=mounted
+for d in (models,videos):d.mkdir(parents=True,exist_ok=True)
+'''+s[b:]
+    a=s.index('def drive_result(p):');b=s.index('\ndef ',a+1)+1
+    s=s[:a]+'''def drive_result(p,ident):
+    def link(fid):
+        if not re.fullmatch(r'[a-zA-Z0-9_-]{10,160}',fid):raise ValueError('invalid file id')
+        return 'https://drive.google.com/file/d/'+fid+'/view'
+    try:return link(os.getxattr(p,'user.drive.id').decode())
+    except OSError:pass
+    for _ in range(100):
+        signal=exchange('h3upload-'+ident+'.json')
+        if signal:break
+        time.sleep(3)
+    else:raise RuntimeError('云盘上传暂不可用')
+    info=json.loads(signal.read_text());url=info['url'];size=p.stat().st_size
+    if not url.startswith('https://www.googleapis.com/upload/') and not url.startswith('https://content.googleapis.com/upload/'):raise ValueError('invalid upload target')
+    with p.open('rb') as f:
+        r=requests.put(url,data=f,headers={'Content-Length':str(size),'Content-Type':'video/mp4','Content-Range':f'bytes 0-{size-1}/{size}'},timeout=(10,300),allow_redirects=False)
+    r.raise_for_status();fid=r.json()['id'];out=link(fid);os.setxattr(p,'user.drive.id',fid.encode());return out
+'''+s[b:]
+    assert s.count('drive_result(final)')==2
+    s=s.replace('drive_result(final)','drive_result(final,ident)')
+
+    return s+'\n_h3_worker.join()\n'
+if __name__=='__main__':
+    import ast
+    source=Path(sys.argv[1]).read_text();out=build(source)
+    defs=lambda src:{n.name for n in ast.parse(src).body if isinstance(n,ast.FunctionDef)}
+    assert (defs(source)-defs(out)) <= {'check_gpu'}, 'rendering functions lost'
+    if len(sys.argv)>3:
+        backend=Path(sys.argv[3]).read_text()
+        out=("import os,sys\nfrom pathlib import Path\n"
+             "os.environ['H3_BF16_MODEL_DIR']=str((Path('/mnt/local-scratch') if Path('/mnt/local-scratch').is_mount() else Path('/content'))/'h3-managed-bf16-models')\n"
+             "Path('/content/h3_bf16.py').write_text("+repr(backend)+",encoding='utf-8')\n"
+             "sys.path.insert(0,'/content')\nH3_STUDIO_MODEL='bf16'\n"+out)
+    Path(sys.argv[2]).write_text(out)
