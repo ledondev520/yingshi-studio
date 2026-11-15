@@ -37,6 +37,7 @@ jobs:
           python3 validate_runtime_lifecycle.py
           python3 validate_multiuser.py
           python3 validate_worker_loop.py
+          python3 validate_attention.py
           python3 validate_images.py
           python3 validate_image_worker.py
           python3 validate_planning.py
