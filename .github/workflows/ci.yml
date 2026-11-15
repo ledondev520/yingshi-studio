@@ -18,6 +18,8 @@ jobs:
           node-version: "22"
       - name: Install video preview tools
         run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg
+      - name: Install cache-client test dependency
+        run: python3 -m pip install requests
       - name: Verify worker artifacts are synchronized
         run: |
           python3 build_workers.py
@@ -35,6 +37,7 @@ jobs:
           python3 validate_worker_loop.py
           python3 validate_images.py
           python3 validate_image_worker.py
+          python3 validate_model_cache.py
           python3 - <<'PY'
           import pathlib
           def box(t, b): return (len(b) + 8).to_bytes(4, 'big') + t + b
@@ -64,4 +67,5 @@ jobs:
           import check
           check.run()
           check.multiuser_pool()
+          check.quota_feedback()
           PY
