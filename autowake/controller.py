@@ -1,4 +1,5 @@
 """Bounded provisioning slots. Queue consumers never wait on these API calls."""
+import requests
 import contextlib,fcntl,hashlib,json,os,re,secrets,sqlite3,subprocess,sys,tempfile,time,uuid
 from pathlib import Path
 from google.auth.transport.requests import AuthorizedSession
@@ -71,8 +72,14 @@ class Slot:
         with database() as c:c.execute('insert or ignore into pairs(verifier,device,gpu,code,expiry,approved) values(?,?,?,NULL,0,1)',(v,self.device,s.accelerator))
         fc=RuntimeFiles(s);fc.upload(str(self.identity),'h3managedidentity.json')
         fc.upload(str(DIR/('cold-bf16.py' if self.cache['mode']=='bf16' else 'cold-worker.py')),'h3managedworker.py')
-        p=subprocess.run([CLI,'--auth','adc','exec','-s',self.name,'-f',str(DIR/'launch.py')],capture_output=True,timeout=150,stdin=subprocess.DEVNULL)
-        if p.returncode or b'H3_LAUNCHED' not in p.stdout+p.stderr:raise RuntimeError('boot failed')
+        response=requests.get(fc.url+'/api/kernels',headers=fc.headers,timeout=(5,15));response.raise_for_status()
+        if any(k.get('execution_state')=='busy' for k in response.json()):return
+        # Keep provisioning responsive while the actual worker occupies its kernel.
+        with (PRIVATE/(self.name+'-execution.log')).open('ab') as log:
+            child=subprocess.Popen([CLI,'--auth','adc','exec','-s',self.name,'-f',str(DIR/'launch.py'),'--timeout','86400'],stdout=log,stderr=subprocess.STDOUT,stdin=subprocess.DEVNULL)
+        try:code=child.wait(timeout=2)
+        except subprocess.TimeoutExpired:return
+        if code:raise RuntimeError('kernel launch failed')
     def clear(self):
         for k in ('endpoint','pending','sent','born','launched','last','mode','external'):self.cache.pop(k,None)
         self.persist()

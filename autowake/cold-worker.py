@@ -316,7 +316,54 @@ def dimensions(job):
     width,height=(short,long) if orient=='portrait' else (short,short) if orient=='square' else (long,short)
     return width,height
 
+def checkpoint_piece(job,ix,piece,upload=False):
+    url=BASE+'/api/worker/media/checkpoint/'+job['id']+'/'+str(ix)
+    headers={**relay_headers(),'X-H3-Lease':job.get('lease_token',''),'X-H3-Shot-Ticket':job.get('_shot_ticket','')}
+    if upload:
+        meta=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams','-show_format','-of','json',piece]))
+        video=next(x for x in meta['streams'] if x['codec_type']=='video')
+        if (video['width'],video['height'])!=dimensions(job) or float(meta['format']['duration'])<float(job['shots'][ix]['seconds'])-.15:
+            raise ValueError('本机镜头尺寸或时长不完整，已保留文件')
+        sha=file_digest(piece);headers.update({'Content-Type':'video/mp4','X-Content-SHA256':sha})
+        for attempt in range(3):
+            with piece.open('rb') as stream:
+                r=requests.put(url,headers=headers,data=stream,timeout=(10,90),allow_redirects=False)
+            if r.status_code not in (429,502,503,504) or attempt==2:break
+            time.sleep(2*(attempt+1))
+        r.raise_for_status();return True
+    tmp=piece.with_suffix('.restore.part')
+    try:
+        with requests.get(url,headers=headers,stream=True,timeout=(10,90),allow_redirects=False) as r:
+            if r.status_code==404:return False
+            r.raise_for_status();sha=r.headers.get('X-Content-SHA256','');size=int(r.headers['Content-Length'])
+            with tmp.open('wb') as f:
+                for chunk in r.iter_content(262144):f.write(chunk)
+                f.flush();os.fsync(f.fileno())
+        if tmp.stat().st_size!=size or file_digest(tmp)!=sha:raise ValueError('服务器镜头校验失败，停止重算')
+        tmp.replace(piece);durable(piece.with_suffix('.checkpoint.json'),{'spec':job['checkpoint_spec']})
+        return True
+    finally:tmp.unlink(missing_ok=True)
+
+def restore_pieces(job,pieces,update):
+    pending=set()
+    for ix,piece in enumerate(pieces):
+        if checkpoint_piece(job,ix,piece):
+            update('running',int(4+85*(ix+1)/len(pieces)),f'已恢复第 {ix+1} 镜，无需重算');continue
+        if piece.is_file():
+            marker=piece.with_suffix('.checkpoint.json')
+            if not marker.is_file() or json.loads(marker.read_text()).get('spec')!=job['checkpoint_spec']:
+                raise ValueError('发现旧本机片段，已保留；需要核对渲染计划后恢复')
+            checkpoint_piece(job,ix,piece,True)
+        else:pending.add(ix)
+    return pending
+
 def render_piece(job,ix,path,piece,previous,update):
+    if checkpoint_piece(job,ix,piece):return
+    durable(piece.with_suffix('.checkpoint.json'),{'spec':job['checkpoint_spec']})
+    _render_piece(job,ix,path,piece,previous,update)
+    checkpoint_piece(job,ix,piece,True)
+
+def _render_piece(job,ix,path,piece,previous,update):
     ident=job['id'];s=job['shots'][ix];d=float(s['seconds'])
     width,height=dimensions(job);pct=int(4+85*ix/len(job['shots']))
     if (job.get('precision') or 'quantized')!=PRECISION:raise ValueError('任务与执行端模型不符')
@@ -410,7 +457,7 @@ def take_assisted_piece(job,ix,path,piece,update):
     return None  # helper is still rendering; look for another ready shot
 
 def render_assist(task):
-    job=task['job'];ix=task['ix'];ticket=task['ticket']
+    job=task['job'];job['_shot_ticket']=task['ticket'];ix=task['ix'];ticket=task['ticket']
     path=ACTIVE_DIR/hashlib.sha256(job['id'].encode()).hexdigest()[:24];path.mkdir(exist_ok=True)
     piece=path/('helper-'+ticket+'.mp4')
     args={'id':job['id'],'ix':ix,'ticket':ticket}
@@ -423,12 +470,11 @@ def render_assist(task):
             with piece.open('rb') as f:
                 r=requests.put(BASE+'/api/worker/media/shot/'+ticket,data=f,headers={**relay_headers(),'Content-Type':'video/mp4','X-Content-SHA256':file_digest(piece)},timeout=(8,60),allow_redirects=False);r.raise_for_status()
         rpc('/api/worker/shot/ready',{**args,'size':piece.stat().st_size})
+        if task.get('relay'):piece.unlink(missing_ok=True)
     except Exception:
         try:rpc('/api/worker/shot/release',args)
         except Exception:pass
         raise
-    finally:
-        if task.get('relay'):piece.unlink(missing_ok=True)
 
 def render_job(job):
     ident=str(job['id']); lease=job['lease_token']
@@ -447,7 +493,7 @@ def render_job(job):
         url=drive_result(final,ident);update('done',100,'已从 Drive 恢复成片',url);return
     src,last=source_for(job,path) if job.get('append_source') else (None,None)
     pieces=[path/f'{i:02d}.mp4' for i in range(len(shots))]
-    pending={i for i,p in enumerate(pieces) if not p.is_file()}
+    pending=restore_pieces(job,pieces,update)
     width,height=dimensions(job)
     is_hd=job.get('quality')=='hd'
     while pending:

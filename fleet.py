@@ -1,5 +1,6 @@
 """Compute the shortage, not just the number of idle GPUs. Shared by API and provisioner."""
 import json
+import checkpoints
 MAX_CARDS=6
 FRESH=100
 def setup(c):
@@ -41,7 +42,8 @@ def need(c,t):
             owner=avail.pop(0) if avail else None
             if owner:idle.remove(owner)
             else:missing.append(mode)
-            count=min(MAX_CARDS-1,len(cuts(json.loads(j['shots']),j['route'])))
+            saved={r[0] for r in c.execute('SELECT ix FROM shot_checkpoints WHERE job=? AND spec=?',(j['id'],checkpoints.spec(j)))}
+            count=min(MAX_CARDS-1,len(set(cuts(json.loads(j['shots']),j['route']))-saved))
         else:
             owner=j['wid']
             group=tasks.get(j['id'],[])
