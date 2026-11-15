@@ -135,20 +135,48 @@ async function boot(){const hash=new URLSearchParams(location.hash.slice(1));con
 window.addEventListener('hashchange',()=>{if(location.hash.startsWith('#activate=')||location.hash.startsWith('#job='))boot()});boot();setInterval(()=>{if(!document.hidden)refresh(!logged)},5000);
 
 
-let previewJob='';
+let previewJob='',stopPlaybackCheck=()=>{};
 function mediaUrl(j,preview=false){const tok=j.watch_token||jobToken(j.id);return 'api/'+(preview?'preview/':'media/')+encodeURIComponent(j.id)+(tok?'?token='+encodeURIComponent(tok):'')}
 function renderPreview(j){
  const image=j.kind==='image',frame=$('frame'),state=image?'ready':j.preview_status||'pending',key=j.id+':'+state;if(frame.dataset.preview===key)return;frame.dataset.preview=key;
- const url=mediaUrl(j);$('downloadFilm').href=url+(url.includes('?')?'&':'?')+'download=1';$('downloadFilm').download='映室-'+j.id.slice(0,8)+(image?'.png':'.mp4');
+ stopPlaybackCheck();$('retryPreview').hidden=true;const url=mediaUrl(j);$('downloadFilm').href=url+(url.includes('?')?'&':'?')+'download=1';$('downloadFilm').download='映室-'+j.id.slice(0,8)+(image?'.png':'.mp4');
  $('previewHeading').textContent=image?'图片预览':'成片预览';$('downloadFilm').textContent=image?'下载 PNG':'下载高清原片';
  if(image){const img=document.createElement('img');img.src=url;img.alt=j.brief||'生成图片';img.onerror=()=>{$('previewStatus').textContent='图片加载失败，请关闭后重试或下载原图。'};frame.replaceChildren(img);$('previewStatus').textContent='站内私有预览 · 原始 PNG';return}
  $('previewStatus').textContent=state==='ready'?'轻量预览 · 下载可获取高清原片。':state==='failed'?'预览暂不可用，后台会重试；高清原片可直接下载。':'预览版准备中，完成后即可播放；高清原片已保存，可直接下载。';
  frame.replaceChildren();if(state!=='ready')return;
  const v=document.createElement('video');v.src=mediaUrl(j,true);v.controls=true;v.playsInline=true;v.preload='metadata';v.setAttribute('aria-label',j.brief||'成片预览');
- v.onerror=()=>{$('previewStatus').textContent='预览加载失败，请关闭后重试，或下载高清原片。'};frame.append(v);v.play().catch(()=>{});
+ v.onwaiting=()=>{$('previewStatus').textContent='正在缓冲视频…';$('retryPreview').hidden=false};
+ v.onplaying=()=>{$('previewStatus').textContent='轻量预览 · 下载可获取高清原片。';$('retryPreview').hidden=true};
+ v.onerror=()=>{$('previewStatus').textContent='预览加载失败，可重试或下载高清原片。';$('retryPreview').hidden=false};
+ frame.append(v);stopPlaybackCheck=checkPlayback(v,j);playPreview(v);
+
 }
-function openPreview(j){if(!j.media_ready||!j.id)return;previewJob=j.id;renderPreview(j);$('preview').showModal()}
-$('closePreview').onclick=()=>$('preview').close();$('preview').onclose=()=>{previewJob='';$('frame').replaceChildren();delete $('frame').dataset.preview};
+function openPreview(j){if(!j.media_ready||!j.id)return;previewJob=j.id;$('preview').showModal();renderPreview(j)}
+$('closePreview').onclick=()=>$('preview').close();$('preview').onclose=()=>{stopPlaybackCheck();previewJob='';const v=$('frame').querySelector('video');if(v){v.pause();v.removeAttribute('src');v.load()}$('frame').replaceChildren();delete $('frame').dataset.preview};
+
+function playPreview(v){
+ v.play().catch(e=>{if(!$('frame').contains(v))return;v.dataset.playError=e.name;$('previewStatus').textContent=e.name==='NotAllowedError'?'浏览器需要再次确认，请点「播放／重试」。':'视频尚未开始播放，请重试或下载高清原片。';$('retryPreview').hidden=false});
+}
+$('retryPreview').onclick=()=>{const v=$('frame').querySelector('video');if(v){if(v.error)v.load();playPreview(v)}};
+// Temporary playback-check instrumentation: only active through an explicit diagnostic link.
+function checkPlayback(v,j){
+ const run=new URLSearchParams(location.search).get('playback_check');if(!/^[a-f0-9]{16}$/.test(run||''))return ()=>{};
+ const start=performance.now(),events=[],controller=new AbortController();let active=true,probeTimer;
+ for(const event of ['loadedmetadata','loadeddata','playing','waiting','stalled','error'])v.addEventListener(event,()=>{events.push([event,Math.round(v.currentTime*10)/10,v.readyState]);if(events.length>12)events.shift()});
+ const timer=setTimeout(async()=>{
+  let bytes=0,status=0,probeError='',total=0;const began=performance.now();
+  probeTimer=setTimeout(()=>controller.abort(),12000);
+  try{
+   const res=await fetch(mediaUrl(j,true),{headers:{Range:'bytes=0-65535'},cache:'no-store',signal:controller.signal});status=res.status;
+   total=Number((res.headers.get('Content-Range')||'').split('/')[1])||0;
+   if(res.ok){const reader=res.body.getReader();while(true){const chunk=await reader.read();if(chunk.done)break;bytes+=chunk.value.length}}
+  }catch(e){probeError=e.name}finally{clearTimeout(probeTimer)}
+  if(!active)return;
+  const report={run,elapsed:Math.round(performance.now()-start),seconds:Math.round(v.currentTime*10)/10,ready:v.readyState,network:v.networkState,paused:v.paused,error:v.error?.code||0,playError:v.dataset.playError||'',buffered:v.buffered.length?v.buffered.end(v.buffered.length-1):0,status,bytes,total,bps:Math.round(bytes/((performance.now()-began)/1000)),probeError,events};
+  try{const res=await fetch('api/health?playback_check='+encodeURIComponent(btoa(JSON.stringify(report))),{cache:'no-store'});if(active&&res.ok)$('previewStatus').textContent+=' 检测结果已送达。'}catch{if(active)$('previewStatus').textContent+=' 检测结果发送失败。'}
+ },10000);
+ return ()=>{active=false;clearTimeout(timer);clearTimeout(probeTimer);controller.abort()};
+}
 
 
 function paintReply(){$('lengthLabel').textContent=parentId?'新增时长':'成片时长';const j=jobs.find(x=>x.id===parentId);$('reply').hidden=!parentId;$('replyText').textContent=parentId?'从原片结尾续拍 · '+((j?.brief||j?.prompt||'已保存的创意').slice(0,38)):'';$('prompt').placeholder=creationKind==='image'?'比如：清晨山间的一间茶馆，暖光透过木窗，门口招牌写着“山间茶事”。电影摄影质感。':parentId?'写接下来发生什么，例如：镜头靠近，两人听着雨声一起笑。':'比如：大雨敲着窗，家里的橘猫和雪纳瑞围着仙女棒聊天。让我们听见雨声和它们的对白。'}
