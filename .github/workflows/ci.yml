@@ -68,4 +68,5 @@ jobs:
           check.run()
           check.multiuser_pool()
           check.quota_feedback()
+          check.runtime_recovery()
           PY

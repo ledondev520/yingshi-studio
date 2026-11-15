@@ -86,7 +86,11 @@ def jobrow(r,internal=False,c=None):
  x['append_source']=bool(x['parent'] and x['total_seconds']>x['seconds'])
  x['route']=r['route'];x['model']=r['director_model']
  if not internal:x['watch_token']=watch_token(r['id'])
- if not internal and c is not None and r['state']=='running':x['sampling']=sampling.visible(c,r,now())
+ if not internal and c is not None:
+  x['recovering']=(r['state']=='queued' and (r['tries'] or 0)>0) or (r['state']=='running' and now()-(r['updated'] or now())>fleet.FRESH)
+  if r['state']=='running':
+   x['sampling']=sampling.visible(c,r,now())
+   if x['recovering']:x['message']='任务回报中断，正在检查 GPU；确认失联后自动重新调度'
  if internal:
   x['checkpoint_spec']=checkpoints.spec(r)
   # Existing Colab workers read shot.prompt; keep the owner's storyboard in Chinese.
@@ -96,6 +100,7 @@ def jobrow(r,internal=False,c=None):
  if c is not None and r['state']=='queued':
   t=now();x['queue_position']=fleet.queue_position(c,r,t)
   x['message']=fleet.wait_message(c,r['precision'] or 'quantized',t,r) or x['message']
+  if x.get('recovering'):x['message']='GPU 断线，自动恢复中 · '+x['message']
  return x
 def worker_status(wr,c=None):
  out={'online':bool(wr and now()-wr['seen']<100),'gpu':wr['gpu'] if wr else None,'seen':wr['seen'] if wr else None}

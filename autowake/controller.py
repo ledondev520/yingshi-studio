@@ -107,7 +107,7 @@ class Slot:
         except subprocess.TimeoutExpired:return
         if code:raise RuntimeError('kernel launch failed')
     def clear(self):
-        for k in ('endpoint','pending','sent','born','launched','last','mode','external'):self.cache.pop(k,None)
+        for k in ('endpoint','pending','sent','born','launched','last','mode','external','retry'):self.cache.pop(k,None)
         self.persist()
         if self.store.get(self.name):self.store.remove(self.name)
         with database() as c:
@@ -161,7 +161,9 @@ class Slot:
             try:machine=cl.get(ep)
             except Exception as e:
                 if getattr(getattr(e,'response',None),'status_code',None)!=404:raise
-                if owned:self.clear();return
+                if owned:
+                    with database() as c:requeued=fleet.requeue_device(c,wid,t)
+                    self.clear();print(self.name,'runtime missing (404); requeued jobs:',requeued,flush=True);return
                 if not want:
                     if t-a.get('pending',t)>600:self.clear()
                     return
@@ -194,7 +196,7 @@ class Slot:
             if broken and not a.get('endpoint'):
                 with database() as c:c.execute('insert or replace into pool_retry values(?,?)',(mode,t+1800))
             return
-        if not live and want and time.time()-a.get('launched',0)>150:
+        if not live and (want or mine or helps) and time.time()-a.get('launched',0)>150:
             try:
                 self.initialize(self.register(machine))
                 a['launched']=time.time();self.persist()

@@ -36,3 +36,21 @@ def run():
         assert '活动运行时已达上限' in fleet.wait_message(c,'bf16',t)
  print('PASS idle first, both precisions, 6-card cap, cross-machine lease and disappearing demand')
 if __name__=='__main__':run()
+
+def recovery_feedback():
+ from unittest.mock import patch
+ with tempfile.TemporaryDirectory() as tmp:
+    server.DATA=Path(tmp);server.setup();t=2000
+    with server.db() as c,patch.object(server,'now',return_value=t):
+        c.execute("insert into jobs(id,shots,seconds,state,message,updated,tries) values('lost','[]',15,'running','生成第 1/1 镜',?,1)",(t-101,))
+        def visible():return server.jobrow(c.execute('select * from jobs').fetchone(),c=c)
+        assert visible()['recovering'] and '回报中断' in visible()['message']
+        assert server.fleet.cluster_summary(c,t)['recovering_jobs']==1
+        c.execute('update jobs set updated=?',(t,));assert not visible()['recovering']
+        assert server.fleet.cluster_summary(c,t)['recovering_jobs']==0
+        c.execute("update jobs set state='queued',message='GPU 断线，正在自动重新调度'")
+        c.execute("insert into pool_signal values('replacement','quantized','loading',?)",(t+300,))
+        row=visible();assert row['recovering'] and '自动恢复' in row['message'] and '准备模型' in row['message']
+        c.execute('update jobs set tries=0');assert not visible()['recovering']
+ print('PASS stale reports and replacement preparation have explicit recovery status')
+if __name__=='__main__':recovery_feedback()

@@ -5,7 +5,12 @@ MAX_CARDS=32
 MAX_JOB_CARDS=6
 FRESH=100
 def requeue_expired(c,t):
-    c.execute("UPDATE jobs SET state='queued',message='GPU 断线，保留已完成镜头并等待重新调度',lease=NULL,deadline=NULL,wid=NULL,updated=? WHERE state='running' AND deadline<?",(t,t))
+    c.execute("UPDATE jobs SET state='queued',progress=0,message='GPU 断线，保留已完成镜头并等待重新调度',lease=NULL,deadline=NULL,wid=NULL,updated=? WHERE state='running' AND deadline<?",(t,t))
+def requeue_device(c,device,t):
+    # A confirmed runtime 404 fences off its lease immediately; checkpoints survive.
+    count=c.execute("UPDATE jobs SET state='queued',progress=0,message='GPU 运行时已断开，正在自动重新调度',lease=NULL,deadline=NULL,wid=NULL,updated=? WHERE state='running' AND instr(wid,?||'/')=1",(t,device)).rowcount
+    c.execute("UPDATE shot_tasks SET state='open',helper=NULL,ticket=NULL,deadline=NULL,size=NULL WHERE state='taken' AND instr(helper,?||'/')=1",(device,))
+    return count
 def setup(c):
     c.execute('create table if not exists worker_caps(id text primary key,shots int,relay int,hd int,fast int,append_ok int)')
     c.execute('create table if not exists pool_signal(device text primary key,mode text,stage text,until integer)')
@@ -69,10 +74,11 @@ def queue_position(c,job,t=None):
 def cluster_summary(c,t):
     workers=_live_workers(c,t)
     running=c.execute("SELECT COUNT(*) FROM jobs WHERE state='running'").fetchone()[0]
+    recovering=c.execute("SELECT COUNT(*) FROM jobs WHERE state='running' AND updated<?",(t-FRESH,)).fetchone()[0]
     queued=c.execute("SELECT COUNT(*) FROM jobs WHERE state IN ('planning','queued')").fetchone()[0]
     live_devices={device(w) for w in workers}
     signals=[r for r in c.execute('SELECT device,stage FROM pool_signal WHERE until>?',(t,)) if r['device'] not in live_devices]
-    return {'online_count':len(workers),'running_jobs':running,'queued_jobs':queued,
+    return {'online_count':len(workers),'running_jobs':running,'recovering_jobs':recovering,'queued_jobs':queued,
             'loading_count':sum(r['stage']=='loading' for r in signals),
             'requesting_count':sum(r['stage']=='request' for r in signals),
             'runtime_limit':any(r['stage']=='limit' for r in signals)}

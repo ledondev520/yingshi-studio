@@ -107,3 +107,41 @@ def quota_feedback():
             assert c.execute('select stage from pool_signal').fetchone()[0]=='limit'
  print('PASS planning preflight, A100/G4/H100 order, limit feedback survives backoff')
 if __name__=='__main__':quota_feedback()
+
+def runtime_recovery():
+ """A confirmed missing runtime releases work; a transient API error does not."""
+ with tempfile.TemporaryDirectory() as tmp:
+    root=Path(tmp);server.DATA=root;server.setup();m.DB=root/'studio.sqlite';m.PRIVATE=root;m.TOKEN=root/'token';m.TOKEN.touch()
+    t=2000;cl=Mock()
+    with patch.object(m,'StateStore'),patch.object(m,'creds'),patch.object(m,'PublicColab',return_value=cl),patch.object(m.time,'time',return_value=t),patch.object(m.Slot,'initialize') as start,patch.object(m.Slot,'register'):
+        slot=m.Slot(0);slot.cache.update(endpoint='runtimes/lost',mode='quantized',born=100,last=1800,launched=100,retry=t+300);slot.persist()
+        with m.database() as c:
+            m.setup(c)
+            for jid,wid in [('lost',slot.device+'/old'),('safe',slot.device+'-2/healthy')]:
+                c.execute("insert into jobs(id,shots,seconds,state,route,prompt,wid,lease,deadline,updated,tries,progress) values(?,'[]',15,'running','continuous','t',?,'old-lease',?, ?,1,70)",(jid,wid,t+500,t-120))
+            c.execute("insert into shot_checkpoints values('lost',0,'plan','sha',12,100)")
+            c.execute("insert into shot_tasks values('safe','old-lease',1,'taken',?,'ticket',?,null)",(slot.device+'/old',t+50))
+        error=RuntimeError('temporary');error.response=Mock(status_code=503);cl.get.side_effect=error
+        try:slot.step()
+        except RuntimeError:pass
+        else:raise AssertionError('Transient failures must retain the runtime for retry')
+        with m.database() as c:assert c.execute("select state from jobs where id='lost'").fetchone()[0]=='running'
+        assert slot.cache['endpoint']=='runtimes/lost';cl.assign.assert_not_called()
+        error.response.status_code=404;slot.step()
+        with m.database() as c:
+            row=c.execute("select state,lease,wid,deadline,progress from jobs where id='lost'").fetchone()
+            assert tuple(row)==('queued',None,None,None,0),'Confirmed 404 must not wait for the ten-minute job lease'
+            assert c.execute("select state from jobs where id='safe'").fetchone()[0]=='running'
+            assert tuple(c.execute("select state,helper,ticket from shot_tasks").fetchone())==('open',None,None)
+            assert c.execute('select count(*) from shot_checkpoints').fetchone()[0]==1
+        assert not slot.cache.get('endpoint') and slot.cache.get('retry',0)<=t
+        cl.get.side_effect=None;cl.assign.return_value=Mock(endpoint='runtimes/replacement')
+        slot.step();cl.assign.assert_called_once();start.assert_called_once()
+        slot.step();cl.assign.assert_called_once()
+        # A surviving runtime with an idle/dead worker must be restarted even while its job lease is valid.
+        with m.database() as c:
+            c.execute("update jobs set state='running',wid=?,lease='new',deadline=? where id='lost'",(slot.device+'/new',t+500))
+        slot.cache['launched']=t-200;start.reset_mock();slot.step();start.assert_called_once()
+        cl.unassign.assert_not_called()
+ print('PASS confirmed 404 requeues only affected work, retains checkpoints, retries without delay, and revives silent workers')
+if __name__=='__main__':runtime_recovery()
