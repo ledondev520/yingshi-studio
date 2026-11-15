@@ -12,7 +12,13 @@ let role = 'guest';
 let parentId = '';
 let duration = 15;
 let jobs = [];
-let filter = 'all';
+let jobTotals = null;
+const PAGE_SIZE = 5;
+let workKind = 'video';
+let workKindInitialized = false;
+const filters = { video: 'all', image: 'all' };
+const pages = { video: 1, image: 1 };
+let focusJobId = '';
 let version = 0;
 let timer = null;
 let msgTimer = null;
@@ -567,15 +573,58 @@ function buildLiveBox(j) {
   return null;
 }
 
-function updateFilterTabs() {
-  const activeCount = jobs.filter(j => ['planning', 'queued', 'running'].includes(j.state)).length;
-  const doneCount = jobs.filter(j => j.state === 'done').length;
+function jobKind(j) {
+  return j?.kind === 'image' || j?.precision === 'image-bf16' ? 'image' : 'video';
+}
+
+function isActiveState(state) {
+  return ['planning', 'queued', 'running'].includes(state);
+}
+
+function setWorkKind(next, persist = true) {
+  workKind = next === 'image' ? 'image' : 'video';
+  workKindInitialized = true;
+  if (persist) localWrite('work-kind', workKind);
+}
+
+function updateWorkSwitch(videoJobs, imageJobs) {
+  const vTotal = Math.max(videoJobs.length, Number(jobTotals?.video) || 0);
+  const iTotal = Math.max(imageJobs.length, Number(jobTotals?.image) || 0);
+  const vActive = videoJobs.filter(j => isActiveState(j.state)).length;
+  const iActive = imageJobs.filter(j => isActiveState(j.state)).length;
+
+  $('jobCount').textContent = `视频 ${vTotal} · 图片 ${iTotal}`;
+  $('videoKindCount').textContent = `${vTotal} 个`;
+  $('imageKindCount').textContent = `${iTotal} 张`;
+
+  const vBadge = $('videoActiveBadge');
+  vBadge.hidden = !vActive;
+  vBadge.textContent = vActive ? `${vActive} 进行中` : '';
+
+  const iBadge = $('imageActiveBadge');
+  iBadge.hidden = !iActive;
+  iBadge.textContent = iActive ? `${iActive} 进行中` : '';
+
+  $('kindVideoTab').setAttribute('aria-selected', String(workKind === 'video'));
+  $('kindImageTab').setAttribute('aria-selected', String(workKind === 'image'));
+
+  const lib = $('workLibrary');
+  lib.dataset.kind = workKind;
+  lib.setAttribute('aria-labelledby', workKind === 'image' ? 'kindImageTab' : 'kindVideoTab');
+  $('libraryLabel').textContent = workKind === 'image' ? '图片列表' : '视频列表';
+}
+
+function updateFilterTabs(kindJobs) {
+  const curFilter = filters[workKind] || 'all';
+  const totalCount = kindJobs.length;
+  const activeCount = kindJobs.filter(j => isActiveState(j.state)).length;
+  const doneCount = kindJobs.filter(j => j.state === 'done').length;
   for (const btn of $('tabs').children) {
     const f = btn.dataset.filter;
-    btn.setAttribute('aria-pressed', String(f === filter));
+    btn.setAttribute('aria-pressed', String(f === curFilter));
     if (f === 'active') btn.textContent = activeCount ? `进行中 ${activeCount}` : '进行中';
     else if (f === 'done') btn.textContent = doneCount ? `已完成 ${doneCount}` : '已完成';
-    else btn.textContent = '全部';
+    else btn.textContent = totalCount ? `全部 ${totalCount}` : '全部';
   }
 }
 
@@ -590,27 +639,154 @@ function inferAspectFromJob(j) {
   return 'landscape';
 }
 
-function renderJobs() {
-  const c = $('jobs');
-  c.replaceChildren();
-  updateFilterTabs();
+function buildPageItems(page, totalPages) {
+  if (totalPages <= 7) {
+    return Array.from({ length: totalPages }, (_, i) => i + 1);
+  }
+  if (page <= 4) {
+    return [1, 2, 3, 4, 5, '…', totalPages];
+  }
+  if (page >= totalPages - 3) {
+    return [1, '…', totalPages - 4, totalPages - 3, totalPages - 2, totalPages - 1, totalPages];
+  }
+  return [1, '…', page - 1, page, page + 1, '…', totalPages];
+}
 
-  const seen = jobs.filter(j =>
-    filter === 'all' ||
-    (filter === 'active' ? ['planning', 'queued', 'running'].includes(j.state) : j.state === 'done')
-  );
-  $('jobCount').textContent = jobs.length + ' 个任务';
+function goToPage(nextPage) {
+  pages[workKind] = Math.max(1, Number(nextPage) || 1);
+  renderJobs();
+  const anchor = $('historyTitle');
+  if (anchor && anchor.getBoundingClientRect().top < 0) {
+    anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+}
 
-  if (!seen.length) {
-    c.append(tx('div', filter === 'all' ? '还没有任务。写下第一个创意，作品会出现在这里。' : '当前筛选下没有任务。', 'empty'));
+function renderPager(totalItems, page, totalPages, startIdx, shownCount) {
+  const lib = $('workLibrary');
+  const pager = $('jobPager');
+  const topPager = $('topPager');
+  const info = $('pagerInfo');
+  const controls = $('pagerControls');
+
+  if (!totalItems) {
+    lib.dataset.paged = '0';
+    pager.hidden = true;
+    topPager.hidden = true;
+    topPager.replaceChildren();
+    controls.replaceChildren();
     return;
   }
 
-  for (const j of seen) {
-    const isImage = j.kind === 'image';
+  lib.dataset.paged = '1';
+  pager.hidden = false;
+  topPager.hidden = totalPages <= 1;
+  topPager.replaceChildren();
+  if (totalPages > 1) {
+    const tPrev = tx('button', '‹', 'topPageBtn');
+    tPrev.type = 'button';
+    tPrev.disabled = page <= 1;
+    tPrev.setAttribute('aria-label', '上一页');
+    tPrev.onclick = () => goToPage(page - 1);
+    const tText = tx('span', `${page} / ${totalPages} 页`);
+    const tNext = tx('button', '›', 'topPageBtn');
+    tNext.type = 'button';
+    tNext.disabled = page >= totalPages;
+    tNext.setAttribute('aria-label', '下一页');
+    tNext.onclick = () => goToPage(page + 1);
+    topPager.append(tPrev, tText, tNext);
+  }
+
+  const isImg = workKind === 'image';
+  const unit = isImg ? '张图片' : '个视频';
+  const shortUnit = isImg ? '张' : '个';
+  if (isMobileViewport()) {
+    info.textContent = `第 ${page}/${totalPages} 页 · 共 ${totalItems} ${shortUnit}`;
+  } else if (totalPages > 1) {
+    info.textContent = `第 ${page} / ${totalPages} 页 · 显示 ${startIdx + 1}–${startIdx + shownCount}（共 ${totalItems} ${unit}）`;
+  } else {
+    info.textContent = `共 ${totalItems} ${unit} · 第 1 / 1 页`;
+  }
+
+  controls.replaceChildren();
+
+  const prev = tx('button', '上一页', 'pageBtn');
+  prev.type = 'button';
+  prev.disabled = page <= 1;
+  prev.onclick = () => goToPage(page - 1);
+  controls.append(prev);
+
+  for (const item of buildPageItems(page, totalPages)) {
+    if (item === '…') {
+      const dots = tx('span', '…', 'pageDots');
+      dots.setAttribute('aria-hidden', 'true');
+      controls.append(dots);
+    } else {
+      const b = tx('button', String(item), 'pageBtn pageNum' + (item === page ? ' isCurrent' : ''));
+      b.type = 'button';
+      b.setAttribute('aria-label', `第 ${item} 页`);
+      if (item === page) {
+        b.setAttribute('aria-current', 'page');
+      } else {
+        b.onclick = () => goToPage(item);
+      }
+      controls.append(b);
+    }
+  }
+
+  const next = tx('button', '下一页', 'pageBtn');
+  next.type = 'button';
+  next.disabled = page >= totalPages;
+  next.onclick = () => goToPage(page + 1);
+  controls.append(next);
+}
+
+function emptyLibraryText(isImage, curFilter) {
+  if (curFilter === 'active') {
+    return isImage ? '当前没有进行中的图片任务。' : '当前没有进行中的视频任务。';
+  }
+  if (curFilter === 'done') {
+    return isImage ? '还没有已完成的图片作品。' : '还没有已完成的视频成片。';
+  }
+  return isImage
+    ? '还没有图片作品。在上方创作台选择「图片」写下创意，生成的图片会独立保存在这里。'
+    : '还没有视频成片。在上方创作台选择「视频」写下创意，生成的短片会独立保存在这里。';
+}
+
+function renderJobs() {
+  const c = $('jobs');
+  c.replaceChildren();
+
+  const videoJobs = jobs.filter(j => jobKind(j) === 'video');
+  const imageJobs = jobs.filter(j => jobKind(j) === 'image');
+  updateWorkSwitch(videoJobs, imageJobs);
+
+  const isImageView = workKind === 'image';
+  const kindJobs = isImageView ? imageJobs : videoJobs;
+  updateFilterTabs(kindJobs);
+
+  const curFilter = filters[workKind] || 'all';
+  const seen = kindJobs.filter(j =>
+    curFilter === 'all' ||
+    (curFilter === 'active' ? isActiveState(j.state) : j.state === 'done')
+  );
+
+  if (!seen.length) {
+    renderPager(0, 1, 1, 0, 0);
+    c.append(tx('div', emptyLibraryText(isImageView, curFilter), 'empty'));
+    return;
+  }
+
+  const totalPages = Math.max(1, Math.ceil(seen.length / PAGE_SIZE));
+  const page = Math.min(Math.max(1, pages[workKind] || 1), totalPages);
+  pages[workKind] = page;
+  const startIdx = (page - 1) * PAGE_SIZE;
+  const pageItems = seen.slice(startIdx, startIdx + PAGE_SIZE);
+
+  for (const j of pageItems) {
+    const isImage = jobKind(j) === 'image';
     const card = tx('div', '', 'job');
 
-    // 1. Header row: state badge + clean non-breaking specs + compact timestamp
+    // 1. Header row: state badge + clean media-specific specs + compact timestamp
     const head = tx('div', '', 'jobHead');
     const badges = tx('div', '', 'jobBadges');
 
@@ -618,19 +794,20 @@ function renderJobs() {
     pill.dataset.state = j.recovering ? 'queued' : j.state;
     badges.append(pill);
 
-    if (j.parent) badges.append(tx('span', '续拍', 'seqBadge'));
+    if (!isImage && j.parent) badges.append(tx('span', '续拍', 'seqBadge'));
 
     const specs = tx('span', '', 'specGroup');
+    const sh0 = j.shots?.[0];
     const specItems = isImage
       ? [
-          '图片',
-          aspectLabels[j.aspect] || '横图'
-        ]
+          aspectLabels[inferAspectFromJob(j)] || '横图',
+          sh0?.width && sh0?.height ? `${sh0.width}×${sh0.height}` : ''
+        ].filter(Boolean)
       : [
           (j.total_seconds || j.seconds) + ' 秒',
           j.shots?.length ? j.shots.length + ' 镜' : '',
-          j.precision === 'bf16' ? 'BF16' : '',
-          j.quality === 'fast' ? '快速预览' : ''
+          j.precision === 'bf16' ? 'BF16' : '量化版',
+          j.quality === 'fast' ? '快速预览' : '768p'
         ].filter(Boolean);
     for (const item of specItems) specs.append(tx('span', item, 'spec'));
     badges.append(specs);
@@ -669,12 +846,18 @@ function renderJobs() {
 
     if (j.state === 'done' && j.media_ready) {
       const label = isImage
-        ? '▶ 查看图片'
+        ? '查看图片'
         : (j.preview_status === 'ready' ? '▶ 播放预览' : '▶ 查看成片');
       const pb = tx('button', label, 'actBtn actPrimary');
       pb.type = 'button';
       pb.onclick = () => openPreview(j);
       actions.append(pb);
+
+      const rawUrl = mediaUrl(j);
+      const dl = tx('a', isImage ? '下载原图' : '下载原片', 'actBtn');
+      dl.href = rawUrl + (rawUrl.includes('?') ? '&' : '?') + 'download=1';
+      dl.download = '映室-' + j.id.slice(0, 8) + (isImage ? '.png' : '.mp4');
+      actions.append(dl);
 
       if (!isImage) {
         const seq = tx('button', '接着续拍', 'actBtn');
@@ -682,6 +865,7 @@ function renderJobs() {
         seq.onclick = () => {
           if ($('prompt').value.trim() && $('prompt').value !== j.brief && !confirm('当前输入框已有内容，要清空并从这条成片结尾续拍吗？')) return;
           creationKind = 'video';
+          setWorkKind('video', true);
           paintMode();
           parentId = j.id;
           $('prompt').value = '';
@@ -696,12 +880,13 @@ function renderJobs() {
     }
 
     if (j.state === 'failed' || j.state === 'cancelled') {
-      const retry = tx('button', '填入重试', 'actBtn');
+      const retry = tx('button', '修改创意', 'actBtn');
       retry.type = 'button';
       retry.onclick = () => {
         if ($('prompt').value.trim() && $('prompt').value !== (j.brief || j.prompt) && !confirm('要用这条任务的提示词替换当前输入框内容吗？')) return;
         creationKind = isImage ? 'image' : 'video';
         if (isImage) imageAspect = inferAspectFromJob(j);
+        setWorkKind(creationKind, true);
         paintMode();
         parentId = isImage ? '' : (j.parent || '');
         paintReply();
@@ -772,6 +957,8 @@ function renderJobs() {
     if (actions.childElementCount) card.append(actions);
     c.append(card);
   }
+
+  renderPager(seen.length, page, totalPages, startIdx, pageItems.length);
 }
 
 async function recoverGuestJobs(current) {
@@ -798,6 +985,7 @@ async function refresh(first = false) {
     if (Number.isFinite(d.now)) serverClockOffset = d.now - Math.floor(Date.now() / 1000);
     showRole(d.role || 'guest');
     const owner = role === 'owner';
+    jobTotals = d.job_totals || null;
     rememberJobs(d.jobs || []);
     jobs = owner ? (d.jobs || []) : await recoverGuestJobs(d.jobs || []);
     rememberJobs(jobs);
@@ -810,6 +998,18 @@ async function refresh(first = false) {
     preparationDetail(w.preparation, $('preparation'));
     $('preparation').hidden = !w.preparation?.length;
 
+    if (focusJobId) {
+      const target = jobs.find(j => j.id === focusJobId);
+      focusJobId = '';
+      if (target) {
+        const k = jobKind(target);
+        setWorkKind(k, true);
+        filters[k] = 'all';
+        const idx = jobs.filter(j => jobKind(j) === k).findIndex(j => j.id === target.id);
+        pages[k] = idx >= 0 ? Math.floor(idx / PAGE_SIZE) + 1 : 1;
+      }
+    }
+
     if (first || prev !== role) {
       const local = localRead('draft', null);
       const draft = owner ? (d.draft || (local ? { ...local, parent: '' } : null)) : local;
@@ -819,8 +1019,18 @@ async function refresh(first = false) {
       const current = jobs.find(j => j.state === 'planning') ||
         jobs.find(j => j.state === 'running') ||
         jobs.find(j => j.state === 'queued');
+      if (!workKindInitialized) {
+        const hasVideos = jobs.some(j => jobKind(j) === 'video');
+        const hasImages = jobs.some(j => jobKind(j) === 'image');
+        const initialKind = current
+          ? jobKind(current)
+          : (draft?.kind === 'image' || (!hasVideos && hasImages))
+            ? 'image'
+            : 'video';
+        setWorkKind(initialKind, false);
+      }
       if (current) watchJob(current);
-      else renderShots(jobs[0] || null);
+      else renderShots(jobs.find(j => jobKind(j) === creationKind) || jobs[0] || null);
     } else if (activeJob) {
       const live = jobs.find(j => j.id === activeJob);
       if (live) renderShots(live);
@@ -842,9 +1052,13 @@ document.querySelectorAll('[name=creationKind]').forEach(el => {
   el.onchange = () => {
     creationKind = el.value;
     if (creationKind === 'image') parentId = '';
+    setWorkKind(creationKind, true);
     paintMode();
     paintReply();
-    if (!boardJob) renderShots(null);
+    if (!boardJob || !isActiveState(boardJob.state)) {
+      renderShots(jobs.find(j => jobKind(j) === creationKind) || null);
+    }
+    renderJobs();
     changed();
   };
 });
@@ -879,10 +1093,31 @@ $('durationStops').onclick = e => {
   changed();
 };
 
+$('workSwitch').onclick = e => {
+  const b = e.target.closest('[data-work-kind]');
+  if (!b) return;
+  const next = b.dataset.workKind;
+  if (next === workKind) return;
+  setWorkKind(next, true);
+  renderJobs();
+};
+
+$('workSwitch').onkeydown = e => {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  e.preventDefault();
+  const next = workKind === 'video' ? 'image' : 'video';
+  setWorkKind(next, true);
+  renderJobs();
+  $(next === 'image' ? 'kindImageTab' : 'kindVideoTab').focus();
+};
+
 $('tabs').onclick = e => {
   const b = e.target.closest('[data-filter]');
   if (!b) return;
-  filter = b.dataset.filter;
+  const next = b.dataset.filter;
+  if (filters[workKind] === next) return;
+  filters[workKind] = next;
+  pages[workKind] = 1;
   renderJobs();
 };
 
@@ -917,9 +1152,11 @@ $('submit').onclick = async () => {
       clearComposer('已提交', false);
     }
 
-    if (filter === 'done') filter = 'all';
+    setWorkKind(jobKind(r.job), true);
+    if (filters[workKind] === 'done') filters[workKind] = 'all';
+    pages[workKind] = 1;
     boardManual = null;
-    showFormMsg('已加入下方任务列表，可继续输入下一条创意。', 4500);
+    showFormMsg('已加入下方对应作品列表，可继续输入下一条创意。', 4500);
     watchJob(r.job);
     await refresh();
   } catch (e) {
@@ -932,6 +1169,12 @@ $('submit').onclick = async () => {
 };
 
 async function boot() {
+  const savedKind = localRead('work-kind', '');
+  if (savedKind === 'video' || savedKind === 'image') {
+    workKind = savedKind;
+    workKindInitialized = true;
+  }
+  renderJobs();
   const hash = new URLSearchParams(location.hash.slice(1));
   const token = hash.get('activate');
   const shared = hash.get('job');
@@ -951,6 +1194,7 @@ async function boot() {
     const [jid, jtok] = shared.split('.');
     if (/^[a-f0-9]{32}$/.test(jid || '') && /^[a-f0-9]{32}$/.test(jtok || '')) {
       rememberJobs([{ id: jid, watch_token: jtok }]);
+      focusJobId = jid;
       $('activationMsg').textContent = '已打开分享作品，正在同步进度…';
       setTimeout(() => {
         if ($('activationMsg').textContent.includes('正在同步进度')) $('activationMsg').textContent = '';
@@ -963,7 +1207,16 @@ async function boot() {
 window.addEventListener('hashchange', () => {
   if (location.hash.startsWith('#activate=') || location.hash.startsWith('#job=')) boot();
 });
-window.addEventListener('resize', () => renderShots());
+
+let lastMobile = isMobileViewport();
+window.addEventListener('resize', () => {
+  renderShots();
+  const nowMobile = isMobileViewport();
+  if (nowMobile !== lastMobile) {
+    lastMobile = nowMobile;
+    renderJobs();
+  }
+});
 
 boot();
 setInterval(() => {
