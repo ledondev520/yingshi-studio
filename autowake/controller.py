@@ -9,7 +9,7 @@ from colab_cli.client import Variant,Accelerator
 from colab_cli.state import StateStore,SessionState
 DIR=Path(__file__).resolve().parent
 sys.path.insert(0,str(DIR.parent if (DIR.parent/'fleet.py').exists() else Path('/opt/h3-studio/current')))
-import fleet,shot_relay
+import fleet,shot_relay,preparation
 DATA=Path(os.environ.get('H3_DATA','/var/lib/h3-studio'));PRIVATE=Path.home()
 DB=DATA/'studio.sqlite';TOKEN=PRIVATE/'.config/colab-cli/token.json'
 CLI='/opt/h3-studio/autowake-venv/bin/colab'
@@ -97,9 +97,11 @@ class Slot:
         ident=json.loads(self.identity.read_text());v=hashlib.sha256(ident['worker_key'].encode()).hexdigest()
         with database() as c:c.execute('insert or ignore into pairs(verifier,device,gpu,code,expiry,approved) values(?,?,?,NULL,0,1)',(v,self.device,s.accelerator))
         fc=RuntimeFiles(s);fc.upload(str(self.identity),'h3managedidentity.json')
+        fc.upload(str(DIR/'preparation_client.py'),'h3_preparation.py')
         fc.upload(str(DIR.parent/'colab-image-worker.py' if self.cache['mode']=='image-bf16' else DIR/('cold-bf16.py' if self.cache['mode']=='bf16' else 'cold-worker.py')),'h3managedworker.py')
         response=requests.get(fc.url+'/api/kernels',headers=fc.headers,timeout=(5,15));response.raise_for_status()
         if any(k.get('execution_state')=='busy' for k in response.json()):return
+        with database() as c:preparation.accept(c,self.device,self.cache['mode'],dict(stage='environment',bytes_done=0,bytes_total=0,files_done=0,files_total=0,reused_bytes=0),int(time.time()),lambda *a:None)
         # Keep provisioning responsive while the actual worker occupies its kernel.
         with (PRIVATE/(self.name+'-execution.log')).open('ab') as log:
             child=subprocess.Popen([CLI,'--auth','adc','exec','-s',self.name,'-f',str(DIR/'launch.py'),'--timeout','86400'],stdout=log,stderr=subprocess.STDOUT,stdin=subprocess.DEVNULL)
@@ -114,6 +116,7 @@ class Slot:
             fleet.requeue_device(c,self.device,int(time.time()))
             c.execute('delete from pool_boots where device=?',(self.device,))
             c.execute('delete from pool_signal where device=?',(self.device,))
+            c.execute('delete from pool_preparation where device=?',(self.device,))
             c.execute('delete from worker_drain where device=?',(self.device,))
             c.execute("delete from workers where instr(id,?||'/')=1",(self.device,))
     def release(self,cl,endpoint):

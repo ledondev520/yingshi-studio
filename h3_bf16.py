@@ -18,7 +18,7 @@ PARTS = {"transformer", "text_encoder", "vae", "audio_vae", "scheduler", "audio_
 FILES = {"LICENSE", "model_index.json", "modular_model_index.json"}
 
 
-def prepare():
+def prepare(progress=None):
     import psutil
     from huggingface_hub import HfApi, snapshot_download
     info = subprocess.check_output(["nvidia-smi", "--query-gpu=name,memory.total,memory.free", "--format=csv,noheader,nounits"], text=True)
@@ -42,6 +42,7 @@ def prepare():
     def pending(root):
         return [f for f,n in manifest.items() if not (root/f).is_file() or (root/f).stat().st_size!=n]
     missing = pending(data)
+    if progress:progress.weights(data,manifest)
     if missing:
         if shutil.disk_usage(data).free < sum(manifest[f] for f in missing)+5_000_000_000: raise RuntimeError("Drive 空间不足")
         snapshot_download(REPO,revision=REV,allow_patterns=sorted(manifest),local_dir=str(data),max_workers=2)
@@ -51,6 +52,7 @@ def prepare():
     if scratch.is_mount() and scratch not in data.parents:
         src=scratch/("h3-bf16-"+REV[:7]);src.mkdir(exist_ok=True)
         missing=pending(src)
+        if progress:progress.weights(src,manifest,'copying')
         if shutil.disk_usage(src).free < sum(manifest[f] for f in missing)+5_000_000_000: raise RuntimeError("本地暂存盘空间不足")
         def copy(f):
             dest=src/f;dest.parent.mkdir(parents=True,exist_ok=True)
@@ -58,6 +60,7 @@ def prepare():
             if tmp.stat().st_size!=manifest[f]: raise RuntimeError("暂存分片不完整")
             tmp.replace(dest)
         with ThreadPoolExecutor(max_workers=5) as pool:list(pool.map(copy,missing))
+    if progress:progress.stage('environment')
     venv=Path("/content/minimax-h3-bf16-env"); py=venv/"bin/python"
     if not py.exists():subprocess.run([sys.executable,"-m","venv","--without-pip","--system-site-packages",str(venv)],check=True)
     marker=venv/("studio-ready-"+DIFFUSERS)
@@ -65,6 +68,7 @@ def prepare():
         subprocess.run([str(py),"-m","pip","install","--quiet","diffusers @ git+https://github.com/huggingface/diffusers.git@"+DIFFUSERS,"transformers==5.22.2","accelerate>=1.6","huggingface_hub","av","safetensors","sentencepiece"],check=True)
         subprocess.run([str(py),"-c","import av,torch,torchaudio; from diffusers import ComponentsManager,ModularPipeline; from diffusers.utils.export_utils import encode_video; assert torch.cuda.is_bf16_supported()"],check=True)
         marker.touch()
+    if progress:progress.stage('ready')
     return str(py),str(src)
 
 

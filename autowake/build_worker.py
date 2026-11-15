@@ -41,6 +41,8 @@ for d in (models,videos):d.mkdir(parents=True,exist_ok=True)
 '''+s[b:]
     assert s.count('drive_result(final)')==2
     s=s.replace('drive_result(final)','drive_result(final,ident)')
+    s=s.replace("if PRECISION not in ('quantized','bf16'):","_preparation=Preparation(BASE,config,PRECISION,gpu_present)\nif PRECISION not in ('quantized','bf16'):")
+    s=s.replace('bf16_runtime=h3_bf16.prepare()','bf16_runtime=h3_bf16.prepare(_preparation)')
 
     download="        hf_hub_download(repo_id='Comfy-Org/MiniMax-H3'"
     # shortcut: only pinned quantized video weights are cached; add a BF16 manifest before caching BF16.
@@ -50,10 +52,14 @@ for d in (models,videos):d.mkdir(parents=True,exist_ok=True)
     assert s.count(size_check)==1
     s=s.replace(size_check,"            assert path.stat().st_size == size, name\n        except Exception:\n            if not restore_cached_model(path, name, BASE, token, did, gpu_present):\n                raise")
     assert s.count('    for name, size in files.items():')==1
-    s=s.replace('    for name, size in files.items():','    def prepare_model(pair):\n        name, size = pair')
+    s=s.replace('    for name, size in files.items():','    _preparation.weights(models,files)\n    def prepare_model(pair):\n        name, size = pair')
     s=s.replace("            print('复用：', name)\n            continue","            print('复用：', name)\n            return")
-    s=s.replace("    print('四个文件已就绪')","    from concurrent.futures import ThreadPoolExecutor\n    with ThreadPoolExecutor(2) as downloads:\n        list(downloads.map(prepare_model, files.items()))\n    print('四个文件已就绪')")
-    return 'MODEL_CACHE_MANIFEST='+repr(cache)+'\n'+helper+'\n'+s+'\n_h3_worker.join()\n'
+    s=s.replace("    print('四个文件已就绪')","    from concurrent.futures import ThreadPoolExecutor\n    with ThreadPoolExecutor(2) as downloads:\n        list(downloads.map(prepare_model, files.items()))\n    print('四个文件已就绪')\n    _preparation.stage('environment')")
+    s=s.replace("    print('准备完成')","    print('准备完成')\n    _preparation.stage('ready')")
+    s=s.replace('    g=copy.deepcopy(graph);',"    _preparation.stage('loading')\n    g=copy.deepcopy(graph);")
+    s=s.replace("send('/api/worker/sampler',v);last=v;","send('/api/worker/sampler',v);_preparation.stage('ready');last=v;")
+    s=s.replace("temp);temp.replace(piece)","temp);temp.replace(piece);_preparation.stage('ready')")
+    return 'from h3_preparation import Preparation\nMODEL_CACHE_MANIFEST='+repr(cache)+'\n'+helper+'\n'+s+'\n_h3_worker.join()\n'
 if __name__=='__main__':
     import ast
     source=Path(sys.argv[1]).read_text();out=build(source)

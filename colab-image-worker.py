@@ -1,6 +1,11 @@
 """Persistent original BF16 H3-Image consumer; no quantization or GPU fallback."""
 import hashlib,json,os,re,secrets,shutil,subprocess,sys,threading,time,uuid
 from pathlib import Path
+try:
+    from h3_preparation import Preparation,close_all
+except ModuleNotFoundError:
+    Preparation=None  # Standalone, manually connected workers can run without managed telemetry.
+PREPARATION=None
 
 BASE='https://withkeya.com/h3-studio'
 REVISION='5f90473023975e6271b0ed1dd84c4e88e4bbc6d3'
@@ -39,6 +44,7 @@ def prepare():
     manifest={f.rfilename:f.size for f in info.siblings if f.rfilename in {'model_index.json','modular_model_index.json','LICENSE'} or f.rfilename.partition('/')[0] in parts}
     assert info.sha==REVISION and all(any(n.startswith(p+'/') for n in manifest) for p in parts)
     missing=[n for n,size in manifest.items() if not (CACHE/n).is_file() or ((CACHE/n).stat().st_size!=size and n!='modular_model_index.json')]
+    if PREPARATION:PREPARATION.weights(CACHE,manifest)
     if shutil.disk_usage(CACHE).free<sum(manifest[n] for n in missing)+8_000_000_000:raise RuntimeError('生图权重缓存磁盘空间不足。')
     if missing:
         print('准备原版权重 GB',round(sum(manifest[n] for n in missing)/1e9,2),flush=True)
@@ -48,6 +54,7 @@ def prepare():
     for v in index.values():
         if isinstance(v,list) and len(v)==3 and isinstance(v[2],dict):v[2].update(pretrained_model_name_or_path=str(CACHE),revision=None)
     (CACHE/'modular_model_index.json').write_text(json.dumps(index))
+    if PREPARATION:PREPARATION.stage('loading')
     import torch
     from diffusers import ComponentsManager,ModularPipeline
     manager=ComponentsManager();manager.enable_auto_cpu_offload(device='cuda',memory_reserve_margin='8GB')
@@ -60,6 +67,7 @@ def prepare():
     return pipe
 
 def run():
+    global PREPARATION
     import fcntl,requests,torch
     from PIL import ImageStat
     lock=open('/content/h3-image-worker.lock','a');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -68,6 +76,7 @@ def run():
     if not managed:identity=Path('/content/drive/MyDrive/MiniMax-H3/studio-device.json')
     if not identity.is_file():raise RuntimeError('缺少既有工作端配对信息，请由工作台调度器启动，或先挂载已配对的 Drive。')
     cfg=json.loads(identity.read_text());headers={'Authorization':'Bearer '+cfg['worker_key']}
+    if managed and Preparation:PREPARATION=Preparation(BASE,cfg,'image-bf16',gpu,memory)
     worker={'worker_id':cfg['worker_id'],'runtime_id':secrets.token_hex(12),'gpu':gpu,'memory_mib':memory,'precision':'image-bf16','image_43':True}
     out=Path('/content/h3-image-results') if managed else Path('/content/drive/MyDrive/MiniMax-H3-Image-BF16/outputs/studio');out.mkdir(parents=True,exist_ok=True)
     def call(path,body):
@@ -77,7 +86,9 @@ def run():
             r=requests.put(BASE+'/api/worker/media/'+ident+'?drive_id='+fid,data=f,headers={**headers,'Content-Type':'image/png','X-H3-Worker-ID':worker['worker_id'],'X-H3-GPU':gpu,'X-Content-SHA256':hashlib.sha256(final.read_bytes()).hexdigest()},timeout=(10,120))
         r.raise_for_status();(out/(ident+'.synced')).touch()
     # Do not advertise availability until weights and the original pipeline are ready.
-    pipe=prepare();call('heartbeat',{});print('H3-Image 工作端已连接；模型与缓存持续复用。',flush=True)
+    pipe=prepare()
+    if PREPARATION:PREPARATION.stage('ready')
+    call('heartbeat',{});print('H3-Image 工作端已连接；模型与缓存持续复用。',flush=True)
     active={};guard=threading.Lock();stop=threading.Event()
     def heartbeat():
         while not stop.wait(30):
@@ -143,4 +154,7 @@ def run():
             with guard:active.clear()
 
 if __name__=='__main__':
-    run() if '--run' in sys.argv else bootstrap()
+    try:run() if '--run' in sys.argv else bootstrap()
+    except BaseException:
+        if Preparation:close_all(failed=True)
+        raise

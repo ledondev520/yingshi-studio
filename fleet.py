@@ -1,6 +1,7 @@
 """Compute the shortage, not just the number of idle GPUs. Shared by API and provisioner."""
 import json
 import checkpoints
+import preparation
 MAX_CARDS=32
 MAX_JOB_CARDS=6
 FRESH=100
@@ -79,6 +80,7 @@ def cluster_summary(c,t):
     live_devices={device(w) for w in workers}
     signals=[r for r in c.execute('SELECT device,stage FROM pool_signal WHERE until>?',(t,)) if r['device'] not in live_devices]
     return {'online_count':len(workers),'running_jobs':running,'recovering_jobs':recovering,'queued_jobs':queued,
+            'preparation':preparation.visible(c,t),
             'loading_count':sum(r['stage']=='loading' for r in signals),
             'requesting_count':sum(r['stage']=='request' for r in signals),
             'runtime_limit':any(r['stage']=='limit' for r in signals)}

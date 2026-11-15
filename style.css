@@ -1605,3 +1605,11 @@ footer {
     padding: 3px 6px;
   }
 }
+
+#preparation {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+.preparation .samplerTop b { white-space: normal; }

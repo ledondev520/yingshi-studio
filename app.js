@@ -151,11 +151,11 @@ function paintWorkerStatus(w) {
   tag.dataset.online = on ? '1' : '0';
   if (on) {
     if (run > 0) tag.textContent = n > 1 ? `${n} 卡 · ${run} 生成中` : `${run} 个生成中`;
-    else if (loading > 0) tag.textContent = `${n} 卡在线 · 新卡加载中`;
+    else if (loading > 0) tag.textContent = `${n} 卡在线 · 新卡准备中`;
     else if (q > 0) tag.textContent = 'GPU 即将接单';
     else tag.textContent = n > 1 ? `${n} 卡就绪` : 'GPU 就绪';
   } else if (loading > 0) {
-    tag.textContent = loading > 1 ? `${loading} 卡加载模型` : '加载模型中';
+    tag.textContent = loading > 1 ? `${loading} 卡准备中` : 'GPU 准备中';
   } else if (requesting > 0) {
     tag.textContent = '申请 GPU 中';
   } else if (limit) {
@@ -448,6 +448,38 @@ function conciseRunStage(j) {
   if (s.includes('拼接视频')) return '正在合成音画与配乐…';
   if (s.includes('独立分镜')) return '等待并行分镜汇总…';
   return s || '正在生成…';
+}
+
+function preparationDetail(list, container) {
+  const labels = { environment: '启动环境', download: '下载权重', copying: '传入本机缓存', cache: '复用本机权重', loading: '加载模型', failed: '准备失败，等待自动重试' };
+  const gb = n => (n / 1e9).toFixed(1) + ' GB';
+  const now = Math.floor(Date.now() / 1000) + serverClockOffset;
+  for (const p of list || []) {
+    const kind = p.mode === 'image-bf16' ? '图片' : p.mode === 'bf16' ? '视频 · 原始 BF16' : '视频 · 量化版';
+    const box = tx('div', '', 'jobLive preparation');
+    const title = kind + ' GPU · ' + (labels[p.stage] || '等待执行端回报');
+    const top = tx('div', '', 'samplerTop');
+    top.append(tx('b', title));
+    box.append(top);
+    if (p.bytes_total > 0) {
+      const bar = document.createElement('progress');
+      bar.max = p.bytes_total;
+      bar.value = p.bytes_done;
+      bar.setAttribute('aria-label', title + '，按完整文件统计');
+      box.append(bar, tx('p', `权重已就绪 ${gb(p.bytes_done)} / ${gb(p.bytes_total)} · ${p.files_done} / ${p.files_total} 个文件`, 'statusLine'));
+      if (p.reused_bytes > 0) box.append(tx('p', `其中 ${gb(p.reused_bytes)} 已复用本机缓存`, 'statusLine'));
+      box.append(tx('p', '按完整文件更新，不含尚未完成的文件', 'statusLine'));
+    } else {
+      const detail = p.stage === 'failed' ? '任务已保留，后台会重新尝试。' : p.stage === 'loading'
+        ? '正在将模型载入内存和显存，完成后自动生成。'
+        : '正在安装依赖或启动执行环境，完成后自动进入下一阶段。';
+      box.append(tx('p', detail, 'statusLine'));
+    }
+    const age = Math.max(0, Math.floor(now - p.seen));
+    const elapsed = age < 60 ? `${age} 秒` : `${Math.floor(age / 60)} 分 ${age % 60} 秒`;
+    box.append(tx('p', (p.stale ? '准备进度回报已中断，以上为最后一次实测 · ' : '最近回报：') + elapsed + '前', 'statusLine' + (p.stale ? ' statusWarn' : '')));
+    container.append(box);
+  }
 }
 
 function buildLiveBox(j) {
@@ -795,8 +827,12 @@ function renderJobs() {
     card.append(promptEl);
 
     // 3. Clean live progress / status block
-    const live = buildLiveBox(j);
-    if (live) card.append(live);
+    if (j.preparation?.length && !j.sampling?.length && j.state !== 'planning') {
+      preparationDetail(j.preparation, card);
+    } else {
+      const live = buildLiveBox(j);
+      if (live) card.append(live);
+    }
 
     // 4. Optional inline storyboard / visual description view
     if (openShotJobs.has(j.id) && j.shots?.length) {
@@ -958,6 +994,9 @@ async function refresh(first = false) {
     onlineModes = d.online_modes || null;
     paintMode();
     paintWorkerStatus(w);
+    $('preparation').replaceChildren();
+    preparationDetail(w.preparation, $('preparation'));
+    $('preparation').hidden = !w.preparation?.length;
 
     if (focusJobId) {
       const target = jobs.find(j => j.id === focusJobId);

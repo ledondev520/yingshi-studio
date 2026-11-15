@@ -7,6 +7,7 @@ import checkpoints
 import director
 import image_director
 import sampling
+import preparation
 import shot_tasks, fleet, shot_relay
 import base64, contextlib, hashlib, hmac, json, os, re, secrets, sqlite3, time, uuid
 from datetime import datetime, timezone
@@ -58,6 +59,7 @@ def setup():
   CREATE INDEX IF NOT EXISTS job_queue ON jobs(state,created);
   """)
   c.execute(sampling.TABLE)
+  c.execute(preparation.TABLE)
   c.execute(shot_tasks.TABLE)
   fleet.setup(c);shot_relay.setup(c)
   cols={r[1] for r in c.execute('PRAGMA table_info(jobs)')}
@@ -87,6 +89,8 @@ def jobrow(r,internal=False,c=None):
  x['route']=r['route'];x['model']=r['director_model']
  if not internal:x['watch_token']=watch_token(r['id'])
  if not internal and c is not None:
+  if r['state'] in ('planning','queued','running'):
+   x['preparation']=preparation.visible(c,now(),x['precision'],r['wid'].partition('/')[0] if r['state']=='running' and r['wid'] else None)
   x['recovering']=(r['state']=='queued' and (r['tries'] or 0)>0) or (r['state']=='running' and now()-(r['updated'] or now())>fleet.FRESH)
   if r['state']=='running':
    x['sampling']=sampling.visible(c,r,now())
@@ -234,6 +238,9 @@ class Handler(BaseHTTPRequestHandler):
    slot=d.get('runtime_id','')
    if slot and not re.fullmatch('[a-f0-9]{24}',str(slot)):fail(400,'无效显卡实例')
    if slot:wid=wid+'/'+slot
+   if p=='/api/worker/preparation':
+    with db() as c:preparation.accept(c,wid.partition('/')[0],mode,d,now(),fail)
+    return self.send(200,{'ok':True})
    if p=='/api/worker/sampler':
     with db() as c:sampling.accept(c,wid,d,now(),fail)
     return self.send(200,{'ok':True})
