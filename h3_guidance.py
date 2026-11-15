@@ -44,18 +44,30 @@ def guidance(brief):
 
 def unpack(entry,index,route,allow_cut):
     # Streaming/public UI stays Chinese. The worker receives the separate H3 rewrite.
-    duration,sep,parts=entry.partition('|')
-    if not sep or not duration.strip().isascii() or not duration.strip().isdigit() or not 1<=int(duration)<=15: raise ValueError()
-    fields=[f.strip() for f in parts.split('|||')]
-    if len(fields)!=4 or any(not f or len(f)>2700 for f in fields):raise ValueError()
-    zh,visual,sound,music=fields
-    cut=allow_cut and index>0 and route!='continuous' and zh.startswith('[CUT]')
-    zh=zh.removeprefix('[CUT]').strip()
-    if not zh:raise ValueError()
+    if not isinstance(entry,str):raise ValueError(f'第 {index+1} 镜格式无效')
+    s=entry.strip()
+    pre_cut=bool(re.match(r'^\[cut\]\s*',s,re.I))
+    if pre_cut:s=re.sub(r'^\[cut\]\s*','',s,count=1,flags=re.I)
+    duration,sep,parts=s.partition('|')
+    m_dur=re.fullmatch(r'([0-9]{1,2})(?:\.0+)?\s*(?:s|sec|seconds?|秒)?',duration.strip(),re.I) if sep else None
+    if not m_dur or not 1<=int(m_dur.group(1))<=15:raise ValueError(f'第 {index+1} 镜秒数无效（需 1–15 秒）')
+    raw_fields=[f.strip() for f in parts.split('|||')]
+    if len(raw_fields)==3:raw_fields.append('N/A')
+    if len(raw_fields)!=4:raise ValueError(f'第 {index+1} 镜需用 ||| 分成 4 段字段')
+    zh,visual,sound,music=raw_fields
+    has_cut=pre_cut or bool(re.match(r'^\[cut\]\s*',zh,re.I))
+    zh=re.sub(r'^\[cut\]\s*','',zh,count=1,flags=re.I).strip()
+    cut=allow_cut and index>0 and route!='continuous' and has_cut
+    visual=re.sub(r'^For the target video,\s*at 0\.00 seconds into the target video,\s*<Picture 1>\s*\(from \[Shot 1\]\)\s*is fully referenced\.\s*','',visual,flags=re.I)
+    visual=re.sub(r'^(?:integrated_multimodal_description\s*:\s*)?(?:\[Shot\s*\d+\]\s*)?','',visual,flags=re.I).strip()
+    sound=re.sub(r'^overall_soundscape\s*:\s*','',sound,flags=re.I).strip() or 'N/A'
+    music=re.sub(r'^non_diegetic_music\s*:\s*','',music,flags=re.I).strip() or 'N/A'
+    if not zh or not visual:raise ValueError(f'第 {index+1} 镜缺少中英文画面描述')
+    if any(len(f)>2700 for f in (zh,visual,sound,music)):raise ValueError(f'第 {index+1} 镜单段内容超出长度上限')
     # The current renderer has no user reference upload; only a real preceding frame.
-    if re.search(r'<(?:Image|Picture|Video|Audio)\s*\d+>',visual+sound+music,re.I):raise ValueError()
+    if re.search(r'<(?:Image|Picture|Video|Audio)\s*\d+>',visual+sound+music,re.I):
+        raise ValueError(f'第 {index+1} 镜包含禁止的媒体引用标签')
     alignment=('For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.\n\n'
                if index>0 and not cut else '')
-    visual=re.sub(r'^\[Shot 1\]\s*','',visual)
     rewrite=alignment+'integrated_multimodal_description: [Shot 1] '+visual+'\n\noverall_soundscape: '+sound+'\n\nnon_diegetic_music: '+music
-    return {'seconds':int(duration),'prompt':zh,'h3_prompt':rewrite,**({'cut':True} if cut else {})}
+    return {'seconds':int(m_dur.group(1)),'prompt':zh,'h3_prompt':rewrite,**({'cut':True} if cut else {})}

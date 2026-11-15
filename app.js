@@ -49,7 +49,7 @@ function durations(){$('duration').value=duration;$('durationText').textContent=
 function renderShots(j){
  const c=$('shots');c.replaceChildren();const view=j?.shots||[];const writing=j?.state==='planning',image=j?j.kind==='image':creationKind==='image';
  $('boardHeading').textContent=image?'画面设计':'分镜脚本';
- $('shotLabel').textContent=writing?(image?'创作中':'导演编排中'):view.length?(image?'已完成':view.length+' 段 · '+j.seconds+' 秒'):'等待创意';
+ $('shotLabel').textContent=writing?(image?'创作中':'导演编排中'):view.length?(image?'已完成':view.length+' 段 · '+j.seconds+' 秒'):(j?.state==='failed'?'未生成':'等待创意');
  $('shotHint').hidden=image&&j?.state!=='failed';$('shotHint').textContent=j?.state==='failed'?j.message:writing?'写好的内容会逐段出现。':view.length?'分镜已保存，可在任务记录中查看。':'提交后，分镜会在这里逐段出现。';
  const cuts=view.filter((shot,i)=>i>0&&shot.cut===true).length;
  if(!writing&&['queued','running'].includes(j?.state)&&j.route!=='continuous'&&view.length>=3&&cuts){
@@ -97,13 +97,14 @@ function renderJobs(){
  for(const j of seen){
   const row=tx('div','','job'),left=tx('span',j.recovering?'自动恢复':states[j.state]||j.state,'pill'),mid=tx('div',''),right=tx('div','');
   const title=(j.parent?'↳ ':'')+(j.brief||j.prompt);mid.append(tx('strong',title.length>90?title.slice(0,90)+'…':title));
-  mid.append(tx('small',(j.kind==='image'?[detailDate(j.created),{landscape:'横图',portrait:'竖图',square:'方幅'}[j.aspect],jobMessage(j)]:[detailDate(j.created),modeLabel(j.precision),(j.total_seconds||j.seconds)+' 秒',j.quality==='hd'?'高清 768p':j.quality==='fast'?'快速预览':'',j.shots.length+' 镜',j.message]).filter(Boolean).join(' · ')));
+  mid.append(tx('small',(j.kind==='image'?[detailDate(j.created),{landscape:'横图',portrait:'竖图',square:'方幅'}[j.aspect],jobMessage(j)]:[detailDate(j.created),modeLabel(j.precision),(j.total_seconds||j.seconds)+' 秒',j.quality==='hd'?'高清 768p':j.quality==='fast'?'快速预览':'',j.shots.length?j.shots.length+' 镜':(j.state==='failed'?'未出分镜':''),j.message]).filter(Boolean).join(' · ')));
   if(j.state==='running')runningDetail(j,mid);
   if(j.state==='done'&&j.media_ready){const pb=tx('button',j.kind==='image'?'查看图片':j.preview_status==='ready'?'播放预览':'查看成片');pb.onclick=()=>openPreview(j);right.append(pb);
    if(j.kind!=='image'){const f=tx('button','接着续拍');f.onclick=()=>{if($('prompt').value.trim()&&$('prompt').value!==j.brief&&!confirm('从这条成片的结尾续拍？'))return;watchToken++;creationKind='video';modelMode=j.precision==='bf16'?'bf16':'quantized';paintMode();parentId=j.id;$('prompt').value='';shots=[];paintReply();changed();renderShots();$('workMsg').textContent='写下接下来发生什么，所选时长是新增长度。';$('prompt').focus()};right.append(f)}
   }else if(j.state==='done')right.append(tx('small','作品同步中','muted'));
   if(j.state==='queued'){const b=tx('button','取消排队');b.onclick=async()=>{try{const tok=j.watch_token||jobToken(j.id);await api('cancel',{id:j.id,...(tok?{watch_token:tok}:{})});await refresh()}catch(e){$('workMsg').textContent=e.message}};right.append(b)}
-  const inspect=tx('button','查看描述');inspect.onclick=()=>{renderShots(j);$('boardHeading').scrollIntoView({behavior:'smooth',block:'center'})};right.append(inspect);
+  if(['failed','cancelled'].includes(j.state)){const ed=tx('button','修改创意');ed.onclick=()=>{if($('prompt').value.trim()&&$('prompt').value!==(j.brief||j.prompt)&&!confirm('用这条创意替换当前编辑框内容？'))return;paintPrompt({...j,shots:[]});changed();$('workMsg').textContent=j.state==='failed'?j.message:'已载入创意，修改后可重新提交。';$('prompt').scrollIntoView({behavior:'smooth',block:'center'});$('prompt').focus()};right.append(ed)}
+  if(j.shots.length||j.state!=='failed'){const inspect=tx('button','查看描述');inspect.onclick=()=>{renderShots(j);$('boardHeading').scrollIntoView({behavior:'smooth',block:'center'})};right.append(inspect)}
   const tok=j.watch_token||jobToken(j.id);
   if(tok){const lk=tx('button','追踪链接');lk.onclick=async()=>{const url=location.origin+location.pathname+'#job='+j.id+'.'+tok;try{await navigator.clipboard.writeText(url);lk.textContent='已复制';setTimeout(()=>lk.textContent='追踪链接',1500)}catch{$('workMsg').textContent='追踪链接：'+url}};right.append(lk)}
   row.append(left,mid,right);c.append(row)
