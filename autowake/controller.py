@@ -111,6 +111,7 @@ class Slot:
         self.persist()
         if self.store.get(self.name):self.store.remove(self.name)
         with database() as c:
+            fleet.requeue_device(c,self.device,int(time.time()))
             c.execute('delete from pool_boots where device=?',(self.device,))
             c.execute('delete from pool_signal where device=?',(self.device,))
             c.execute('delete from worker_drain where device=?',(self.device,))
@@ -162,8 +163,7 @@ class Slot:
             except Exception as e:
                 if getattr(getattr(e,'response',None),'status_code',None)!=404:raise
                 if owned:
-                    with database() as c:requeued=fleet.requeue_device(c,wid,t)
-                    self.clear();print(self.name,'runtime missing (404); requeued jobs:',requeued,flush=True);return
+                    self.clear();print(self.name,'runtime missing (404); work requeued',flush=True);return
                 if not want:
                     if t-a.get('pending',t)>600:self.clear()
                     return

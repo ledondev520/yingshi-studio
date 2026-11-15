@@ -74,6 +74,17 @@ def serve(h, sha, fail):
         slots.release()
 
 
+def response_length(response, size, start):
+    if response.status_code not in (200, 206) or (start and response.status_code != 206):
+        raise ValueError('Drive did not honor range')
+    length = response.headers.get('Content-Length')
+    if length is not None and int(length) != size - start:
+        raise ValueError('Cached object length changed')
+    if response.status_code == 206 and response.headers.get('Content-Range') != f'bytes {start}-{size-1}/{size}':
+        raise ValueError('Cache range changed')
+    return size - start
+
+
 def stream(sha, start):
     from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import AuthorizedSession
@@ -87,13 +98,15 @@ def stream(sha, start):
     with auth.get('https://www.googleapis.com/drive/v3/files/' + item['id'], params={'alt': 'media'},
                   headers={'Range': f'bytes={start}-'} if start else {}, stream=True, timeout=(10, 45)) as response:
         response.raise_for_status()
-        if start and response.status_code != 206:
-            raise ValueError('Drive did not honor range')
-        if int(response.headers.get('Content-Length', -1)) != item['size'] - start:
-            raise ValueError('Cached object length changed')
-        print(json.dumps({'size': item['size'] - start}), flush=True)
+        left = response_length(response, item['size'], start)
+        print(json.dumps({'size': left}), flush=True)
         for chunk in response.iter_content(1024 * 1024):
+            if len(chunk) > left:
+                raise ValueError('Cached object too long')
             sys.stdout.buffer.write(chunk)
+            left -= len(chunk)
+        if left:
+            raise ValueError('Cached object truncated')
         sys.stdout.buffer.flush()
 
 

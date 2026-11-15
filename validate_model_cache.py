@@ -15,6 +15,16 @@ import server
 
 
 def run():
+    from types import SimpleNamespace
+    # Drive may stream a valid object without Content-Length.
+    assert model_cache.response_length(SimpleNamespace(status_code=200, headers={}), 100, 0) == 100
+    assert model_cache.response_length(SimpleNamespace(status_code=206, headers={'Content-Range':'bytes 31-99/100'}), 100, 31) == 69
+    for status, headers, start in [(200, {}, 31), (200, {'Content-Length':'99'}, 0), (206, {'Content-Range':'bytes 0-99/100'}, 31)]:
+        try:
+            model_cache.response_length(SimpleNamespace(status_code=status, headers=headers), 100, start)
+            raise AssertionError('Invalid upstream length/range accepted')
+        except ValueError:
+            pass
     blob = b'verified-model-weights' * 100
     sha = hashlib.sha256(blob).hexdigest()
     meta = {'model.safetensors': {'size': len(blob), 'sha256': sha}}
