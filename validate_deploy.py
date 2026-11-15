@@ -70,10 +70,16 @@ def test_atomic_autodeploy_and_rollback():
         tmp = Path(td)
         origin = tmp / 'origin.git'
         work = tmp / 'work'
+        work.mkdir()
         subprocess.run(['git', 'init', '--bare', '-q', str(origin)], check=True)
-        subprocess.run(['git', 'clone', '-q', str(ROOT), str(work)], check=True)
-        subprocess.run(['git', '-C', str(work), 'remote', 'set-url', 'origin', str(origin)], check=True)
-        subprocess.run(['git', '-C', str(work), 'push', '-q', 'origin', 'HEAD:refs/heads/main'], check=True)
+        subprocess.run(f'git -C {str(ROOT)!r} archive HEAD | tar -x -C {str(work)!r}', shell=True, check=True)
+        subprocess.run(['git', '-C', str(work), 'init', '-b', 'main', '-q'], check=True)
+        subprocess.run(['git', '-C', str(work), 'config', 'user.name', 'ci'], check=True)
+        subprocess.run(['git', '-C', str(work), 'config', 'user.email', 'ci@example.com'], check=True)
+        subprocess.run(['git', '-C', str(work), 'add', '.'], check=True)
+        subprocess.run(['git', '-C', str(work), 'commit', '-m', 'init', '-q'], check=True)
+        subprocess.run(['git', '-C', str(work), 'remote', 'add', 'origin', str(origin)], check=True)
+        subprocess.run(['git', '-C', str(work), 'push', '-q', 'origin', 'main'], check=True)
         sha1 = subprocess.check_output(['git', '-C', str(work), 'rev-parse', 'HEAD'], text=True).strip()
 
         base = tmp / 'opt-h3'
