@@ -16,6 +16,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - name: Install video preview tools
+        run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg
       - name: Verify worker artifacts are synchronized
         run: |
           python3 build_workers.py
@@ -25,6 +27,7 @@ jobs:
       - name: Run studio validation suite
         run: |
           node --check app.js
+          python3 validate_previews.py
           python3 validate_pool.py
           python3 validate_scale.py
           python3 validate_launch.py
