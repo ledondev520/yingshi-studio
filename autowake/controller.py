@@ -107,7 +107,7 @@ class Slot:
         t=int(time.time());a=self.cache;owned=a.get('endpoint');mode=a.get('mode','quantized');wid=self.device
         with database() as c:
             if self.index==0:
-                c.execute("update jobs set state=case when tries<3 then 'queued' else 'failed' end,lease=NULL,deadline=NULL,wid=NULL,updated=?,message='GPU 断线，等待重新调度' where state='running' and deadline<?",(t,t))
+                fleet.requeue_expired(c,t)
                 shot_relay.gc(c,DATA,t)
             live=online(c,wid,t)
             mine,helps=working(c,wid,t)

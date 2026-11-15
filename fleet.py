@@ -1,8 +1,11 @@
 """Compute the shortage, not just the number of idle GPUs. Shared by API and provisioner."""
 import json
 import checkpoints
-MAX_CARDS=6
+MAX_CARDS=32
+MAX_JOB_CARDS=6
 FRESH=100
+def requeue_expired(c,t):
+    c.execute("UPDATE jobs SET state='queued',message='GPU 断线，保留已完成镜头并等待重新调度',lease=NULL,deadline=NULL,wid=NULL,updated=? WHERE state='running' AND deadline<?",(t,t))
 def setup(c):
     c.execute('create table if not exists worker_caps(id text primary key,shots int,relay int,hd int,fast int,append_ok int)')
     c.execute('create table if not exists pool_signal(device text primary key,mode text,stage text,until integer)')
@@ -43,11 +46,11 @@ def need(c,t):
             if owner:idle.remove(owner)
             else:missing.append(mode)
             saved={r[0] for r in c.execute('SELECT ix FROM shot_checkpoints WHERE job=? AND spec=?',(j['id'],checkpoints.spec(j)))}
-            count=min(MAX_CARDS-1,len(set(cuts(json.loads(j['shots']),j['route']))-saved))
+            count=min(MAX_JOB_CARDS-1,len(set(cuts(json.loads(j['shots']),j['route']))-saved))
         else:
             owner=j['wid']
             group=tasks.get(j['id'],[])
-            count=min(sum(s['state']=='open' for s in group),max(0,MAX_CARDS-1-sum(s['state']=='taken' and s['deadline']>=t for s in group)))
+            count=min(sum(s['state']=='open' for s in group),max(0,MAX_JOB_CARDS-1-sum(s['state']=='taken' and s['deadline']>=t for s in group)))
         relay=owner is None or (owner in workers and workers[owner]['relay'])
         if owner and (owner not in workers or not workers[owner]['shots']):continue
         for _ in range(count):
@@ -84,10 +87,10 @@ def wait_message(c,mode,t,job=None):
         return f'{prefix}已有空闲 GPU 在线，即将接单'
     if workers:
         if 'loading' in labels:return f'{prefix}当前在线显卡规格不匹配，Colab 已分配新 GPU 正在准备模型'
-        if 'denied' in labels:return f'{prefix}当前在线显卡规格或版本不匹配，且 Colab 暂无额外 GPU，后台会继续重试'
+        if 'denied' in labels:return f'{prefix}当前在线显卡规格或版本不匹配，Colab 库存或账号额度受限；任务已保存，将自动重试'
         if 'request' in labels:return f'{prefix}当前在线显卡规格不匹配，正在向 Colab 申请匹配的 GPU'
         return f'{prefix}当前在线显卡规格或版本不匹配，等待匹配的 GPU 接单'
     if 'loading' in labels:return prefix+'Colab 已分配 GPU，正在准备模型，完成后自动接单'
     if 'request' in labels:return prefix+'正在向 Colab 申请 GPU，已有空闲卡可直接接单'
-    if 'denied' in labels:return prefix+'Colab 暂无可用 GPU，任务已保留，后台会重试'
+    if 'denied' in labels:return prefix+'Colab 库存或账号额度受限，任务已保存，将自动重试'
     return (f'队列第 {pos} 位，等待 GPU 接单' if pos and pos>1 else None)

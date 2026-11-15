@@ -60,6 +60,8 @@ python3 server.py
 ```bash
 python3 validate_pool.py
 python3 validate_scale.py
+python3 validate_multiuser.py
+python3 validate_worker_loop.py
 node --check app.js
 # 片段中转测试需要提供一段很小的测试 MP4：
 python3 validate_relay.py /path/to/small-test.mp4
@@ -67,7 +69,7 @@ python3 validate_relay.py /path/to/small-test.mp4
 
 ## 来源
 
-源码快照取自 2026-11-15 检查时正在运行的 release `sampling-b0f687dbe207`。公开副本只将两个 Google Cloud 项目 ID 改为占位符，新增本说明和忽略规则；没有改变线上部署。
+仓库的起始快照来自 release `sampling-b0f687dbe207`；后续扩容、续跑与连续接单修复见 Git 历史。两个 Google Cloud 项目 ID 在公开源码中使用占位符，部署时须保留自己的真实配置。
 
 `vendor/minimax-h3` 是已有的官方提示词资料快照，来源和固定提交见 [UPSTREAM.md](vendor/minimax-h3/UPSTREAM.md)。第三方资料、模型和依赖仍适用各自许可。本次公开源码未另行授予开源许可证。
 
@@ -76,3 +78,13 @@ python3 validate_relay.py /path/to/small-test.mp4
 每个完成镜头在进入下一镜前上传到 VPS 私有 `shot-checkpoints/`，以任务渲染计划和 SHA-256 校验。换卡或租约过期后先恢复已完成镜头，再生成缺失部分；中转票据清理不再删除持久片段。修改分镜、精度或画质会使旧计划的片段失效。仍未完成的采样步不会跨机器恢复。
 
 自动工作端在 Colab 内核中运行实际任务，避免启动器提前返回导致内核空闲。运行时仍可能被平台回收，故片段备份是必要保障。`validate_resume.py` 验证失联、清理、跨租约恢复及只渲染缺失镜头；`validate_launch.py` 验证启动器不会早于实际工作返回。
+
+## 多人并发容量
+
+自动 GPU 池最多 32 个槽位，依次申请 A100、H100、G4，不回退到 L4/T4。32 是软件上限，不是 Google 对可用卡数的承诺。只按需求补卡，不接管其他会话；队列清空后，闲置约 10 分钟释放自动申请的卡。
+
+全站最多 320 个编排中、排队或运行任务；每位访客最多 10 个未完成任务；同一 IP 每小时最多 600 次新提交，支持多人共用网络。空闲执行端优先领取匹配的新视频，没有匹配的新视频时才协助独立镜头；同片仍最多一主五副。
+
+显卡租约失效后保留已完成片段并重新排队，不因累计三次断线直接作废；模型实际报错仍按失败处理。没有每日算力预算或任务完成次数限制，有需求就持续使用已获批算力；库存、账号额度或付费单元不足时任务保存并重试。`validate_multiuser.py` 验证十用户、32 路领取、身份隔离、机型准入、断线重排及队列边界；`autowake/check.py` 以模拟云端验证 32 个申请槽，不消耗算力。
+
+短暂断网、429 和服务端暂时错误时，主卡带原租约重连，副卡保留原分镜票据；无需等待租约超时即可续跑，完成后继续领取下一条。实际渲染错误仍标为失败，不做无休止重算。

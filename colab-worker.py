@@ -286,7 +286,7 @@ ACTIVE_DIR=root/'studio-jobs'; ACTIVE_DIR.mkdir(exist_ok=True)
 runtime_id=hashlib.sha256(subprocess.check_output(['nvidia-smi','--query-gpu=uuid','--format=csv,noheader'])).hexdigest()[:24]
 def rpc(route, obj):
     r=requests.post(BASE+route,headers={'Authorization':'Bearer '+token},json={'worker_id':worker_id,'gpu':gpu_name,'runtime_id':runtime_id,'precision':PRECISION,'shot_v1':True,'relay_v1':True,'append_v1':True,'turbo8':PRECISION=='quantized','finish_v2':True,**obj},timeout=(8,25),allow_redirects=False)
-    if not r.ok: raise RuntimeError(f'工作台返回 HTTP {r.status_code}')
+    r.raise_for_status()
     return r.json() if r.content else {}
 def durable(p,data):
     tmp=p.with_name(p.name+'.part');tmp.write_text(json.dumps(data,ensure_ascii=False));tmp.replace(p)
@@ -474,6 +474,10 @@ def take_assisted_piece(job,ix,path,piece,update):
         return False
     return None  # helper is still rendering; look for another ready shot
 
+def transient_error(exc):
+    if isinstance(exc,(requests.ConnectionError,requests.Timeout)):return True
+    return isinstance(exc,requests.HTTPError) and exc.response is not None and (exc.response.status_code==429 or exc.response.status_code>=500)
+
 def render_assist(task):
     job=task['job'];job['_shot_ticket']=task['ticket'];ix=task['ix'];ticket=task['ticket']
     path=ACTIVE_DIR/hashlib.sha256(job['id'].encode()).hexdigest()[:24];path.mkdir(exist_ok=True)
@@ -489,7 +493,8 @@ def render_assist(task):
                 r=requests.put(BASE+'/api/worker/media/shot/'+ticket,data=f,headers={**relay_headers(),'Content-Type':'video/mp4','X-Content-SHA256':file_digest(piece)},timeout=(8,60),allow_redirects=False);r.raise_for_status()
         rpc('/api/worker/shot/ready',{**args,'size':piece.stat().st_size})
         if task.get('relay'):piece.unlink(missing_ok=True)
-    except Exception:
+    except Exception as exc:
+        if transient_error(exc):raise
         try:rpc('/api/worker/shot/release',args)
         except Exception:pass
         raise
@@ -561,21 +566,28 @@ def render_job(job):
     note='配乐连续' if music_ok else ('保留原声（首段音乐不足）' if use_music and len(pieces)>1 else '原声')
     update('done',100,f'已保存 · {width}×{height} · '+note,url)
 def worker_loop():
+    resume_lease='';assist=None
     while True:
+        job=None
         try:
-            claim=rpc('/api/worker/claim',{});job=claim.get('job')
-            if claim.get('assist'):
-                render_assist(claim['assist']);continue
+            if assist:
+                render_assist(assist);assist=None;continue
+            claim=rpc('/api/worker/claim',{'resume_lease':resume_lease} if resume_lease else {})
+            job=claim.get('job');assist=claim.get('assist')
+            if assist:continue
             if job:
-                try:render_job(job)
-                except (requests.ConnectionError,requests.Timeout):time.sleep(8)
-                except Exception as exc:
-                    # Do not publish raw logs that may contain environment details.
-                    try:rpc('/api/worker/update',{'id':job['id'],'lease_token':job['lease_token'],'state':'failed','progress':0,'message':'生成未完成：'+type(exc).__name__})
-                    except Exception:pass
-            else:time.sleep(8)
-        except Exception:
-            time.sleep(15)
+                resume_lease=job['lease_token']
+                render_job(job);resume_lease=''
+            else:
+                resume_lease='';time.sleep(8)
+        except Exception as exc:
+            if transient_error(exc):
+                time.sleep(8);continue
+            if job:
+                # Terminal render errors fail this job; stale leases cannot affect its new owner.
+                try:rpc('/api/worker/update',{'id':job['id'],'lease_token':job['lease_token'],'state':'failed','progress':0,'message':'生成未完成：'+type(exc).__name__})
+                except Exception:pass
+            resume_lease='';assist=None;time.sleep(15)
 if not globals().get('_h3_worker') or not _h3_worker.is_alive():
     rpc('/api/worker/heartbeat',{})
     _h3_worker=threading.Thread(target=worker_loop,daemon=True);_h3_worker.start()

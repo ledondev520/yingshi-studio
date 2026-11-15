@@ -47,3 +47,23 @@ def run():
         owned.step();cl.unassign.assert_called_once_with('mine')
  print('PASS concurrent cold reservations, idle-first, capacity denial, single-card completion, owned-only TTL release')
 if __name__=='__main__':run()
+
+def multiuser_pool():
+ """Every waiting video can reserve its own slot, without duplicate allocations."""
+ with tempfile.TemporaryDirectory() as tmp:
+    root=Path(tmp);server.DATA=root;server.setup();m.DB=root/'studio.sqlite';m.PRIVATE=root;m.TOKEN=root/'token';m.TOKEN.touch()
+    with m.database() as c:
+        m.setup(c)
+        for i in range(32):
+            c.execute("insert into jobs(id,shots,seconds,state,route,quality,prompt,created) values(?, ?,15,'queued','continuous','standard','t',?)",(str(i),json.dumps([{'seconds':15,'prompt':'a'}]),i))
+    cl=Mock()
+    cl.assign.side_effect=lambda stable,*args,**kw:Mock(endpoint='runtimes/h3-'+stable.hex[:24])
+    with patch.object(m,'StateStore'),patch.object(m,'creds'),patch.object(m,'PublicColab',return_value=cl),patch.object(m.Slot,'initialize') as start,patch.object(m.Slot,'register'):
+        slots=[m.Slot(i) for i in range(m.fleet.MAX_CARDS)]
+        with ThreadPoolExecutor(10) as ex:list(ex.map(lambda slot:slot.step(),slots))
+        assert len({slot.cache.get('endpoint') for slot in slots})==32
+        assert cl.assign.call_count==start.call_count==32
+        for slot in slots:slot.step()
+        assert cl.assign.call_count==32,'Restarting a poll must not allocate duplicate GPUs'
+ print('PASS 32 independent provisioning reservations, repeated polls allocate no extra runtimes')
+if __name__=='__main__':multiuser_pool()
