@@ -133,7 +133,7 @@ function mediaUrl(j,preview=false){const tok=j.watch_token||jobToken(j.id);retur
 function renderPreview(j){
  const frame=$('frame'),state=j.preview_status||'pending',key=j.id+':'+state;if(frame.dataset.preview===key)return;frame.dataset.preview=key;
  const url=mediaUrl(j);$('downloadFilm').href=url+(url.includes('?')?'&':'?')+'download=1';$('downloadFilm').download='映室-'+j.id.slice(0,8)+'.mp4';
- $('previewStatus').textContent=state==='ready'?'正在播放轻量预览，下载可获取高清原片。':state==='failed'?'预览暂不可用，后台会重试；高清原片可直接下载。':'预览版准备中，完成后会自动播放；高清原片已保存，可直接下载。';
+ $('previewStatus').textContent=state==='ready'?'轻量预览 · 下载可获取高清原片。':state==='failed'?'预览暂不可用，后台会重试；高清原片可直接下载。':'预览版准备中，完成后即可播放；高清原片已保存，可直接下载。';
  frame.replaceChildren();if(state!=='ready')return;
  const v=document.createElement('video');v.src=mediaUrl(j,true);v.controls=true;v.playsInline=true;v.preload='metadata';v.setAttribute('aria-label',j.brief||'成片预览');
  v.onerror=()=>{$('previewStatus').textContent='预览加载失败，请关闭后重试，或下载高清原片。'};frame.append(v);v.play().catch(()=>{});

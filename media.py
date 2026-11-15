@@ -149,7 +149,8 @@ def serve(h,jid,data,db,fail,watch_ok=False,preview=False,download=False):
   if preview_status(data,r)!='ready':fail(409,'预览版准备中，高清原片可下载')
   target=preview_path(data,r);etag='"'+r['media_sha']+'-preview-v1"'
   if h.headers.get('If-None-Match') in (etag,'*'):
-   return h.send(304,b'',hdr={'ETag':etag,'Cache-Control':'private, no-cache'})
+   h.send_response(304);h.send_header('ETag',etag);h.send_header('Cache-Control','private, no-cache');h.end_headers()
+   return
  with open(target,'rb') as f:
   size=os.fstat(f.fileno()).st_size;first,last=0,size-1;partial=False
   raw=h.headers.get('Range') if h.headers.get('If-Range',etag)==etag else None
