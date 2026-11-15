@@ -151,8 +151,8 @@ def project_data(d):
  if not isinstance(raw,list) or not 1<=len(raw)<=12:fail(400,'请使用一至十二个镜头。')
  shots=[]
  for item in raw:
-  if not isinstance(item,dict) or not s(item.get('prompt'),2000) or type(item.get('seconds')) is not int or not 1<=item['seconds']<=15:fail(400,'每镜需要提示词，时长为 1 至 15 秒。')
-  shots.append({'prompt':s(item['prompt'],2000),'seconds':item['seconds'],**({'cut':True} if shots and item.get('cut') is True else {})})
+  if not isinstance(item,dict) or not s(item.get('prompt'),40000) or type(item.get('seconds')) is not int or not 1<=item['seconds']<=15:fail(400,'每镜需要提示词，时长为 1 至 15 秒。')
+  shots.append({'prompt':s(item['prompt'],40000),'seconds':item['seconds'],**({'cut':True} if shots and item.get('cut') is True else {})})
  if sum(i['seconds'] for i in shots)!=sec:fail(400,'各镜时长之和与成片不一致。')
  return prompt,shots,sec
 def digest(tok):return hashlib.sha256(tok.encode()).hexdigest()
@@ -207,7 +207,7 @@ class Handler(BaseHTTPRequestHandler):
   if p=='/api/health' and self.command in ('GET','HEAD'):return self.send(200,{'ok':True,'service':'minimax-h3-studio'})
   if self.command=='POST':
    length=int(self.headers.get('Content-Length') or '0')
-   if not 0<=length<=64000:fail(413,'内容过长')
+   if not 0<=length<=512000:fail(413,'内容过长')
    if self.headers.get('Content-Type','').split(';')[0]!='application/json':fail(415,'需要 JSON')
    d=json.loads(self.rfile.read(length) or b'{}')
    if not isinstance(d,dict):fail(400,'无效对象')
@@ -375,7 +375,7 @@ class Handler(BaseHTTPRequestHandler):
     out={'ok':True,'device_id':r['device'],'gpu':r['gpu']}
    elif p=='/api/draft' and self.command=='POST':
     if not isinstance(d.get('shots',[]),list):fail(400,'分镜有误')
-    draft={'kind':'image' if d.get('kind')=='image' else 'video','aspect':d.get('aspect') if d.get('aspect') in image_director.SIZES else 'landscape','precision':precision(d),'audio_mode':d.get('audio_mode') if d.get('audio_mode') in ('auto','original','continuous') else 'auto','quality':d.get('quality') if d.get('quality') in ('fast','hd','standard') else 'hd','parent':s(d.get('parent'),100),'route':d.get('route') if d.get('route') in ('continuous','story','dialogue','mood') else 'story','prompt':s(d.get('prompt'),4000),'seconds':d.get('seconds') if type(d.get('seconds')) is int and 5<=d['seconds']<=120 else 10,'shots':[{'prompt':s(i.get('prompt'),2000),'seconds':i.get('seconds') if i.get('seconds') in (5,10,15) else 10} for i in d.get('shots',[])[:12] if isinstance(i,dict)]}
+    draft={'kind':'image' if d.get('kind')=='image' else 'video','aspect':d.get('aspect') if d.get('aspect') in image_director.SIZES else 'landscape','precision':'quantized','audio_mode':d.get('audio_mode') if d.get('audio_mode') in ('auto','original','continuous') else 'auto','quality':d.get('quality') if d.get('quality') in ('fast','hd','standard') else 'hd','parent':s(d.get('parent'),100),'route':d.get('route') if d.get('route') in ('continuous','story','dialogue','mood') else 'story','prompt':s(d.get('prompt'),4000),'seconds':d.get('seconds') if type(d.get('seconds')) is int and d['seconds'] in director.ALLOWED_SECONDS else 15,'shots':[{'prompt':s(i.get('prompt'),40000),'seconds':i.get('seconds') if i.get('seconds') in (5,10,15) else 15} for i in d.get('shots',[])[:12] if isinstance(i,dict)]}
     c.execute('INSERT INTO drafts VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,updated=excluded.updated',(pack(draft),now()));out={'ok':True}
    elif mc and self.command=='GET':
     r=c.execute('SELECT * FROM jobs WHERE id=?',(mc[1],)).fetchone()
@@ -384,16 +384,15 @@ class Handler(BaseHTTPRequestHandler):
    elif p=='/api/create' and self.command=='POST':
     kind=d.get('kind','video');aspect=d.get('aspect','landscape')
     if kind not in ('video','image') or aspect not in image_director.SIZES:fail(400,'无效的创作类型或画幅')
-    mode='image-bf16' if kind=='image' else precision(d)
-    if kind=='video' and mode=='image-bf16':fail(400,'请选择图片创作')
+    if kind=='video' and d.get('precision') not in (None,'quantized'):fail(400,'视频生成仅使用量化版模型')
+    mode='image-bf16' if kind=='image' else 'quantized'
     brief=s(d.get('prompt'),4000);sec=0 if kind=='image' else d.get('seconds');req=s(d.get('request_id'),100);parent=s(d.get('parent'),100) or None
     if kind=='image' and parent:fail(400,'图片不支持视频续拍')
     raw_am='original' if kind=='image' else d.get('audio_mode');raw_q='standard' if kind=='image' else d.get('quality')
     if raw_am is not None and raw_am not in ('auto','original','continuous'):fail(400,'无效的声音设置')
     if raw_q is not None and raw_q not in ('auto','standard','fast','hd'):fail(400,'无效生成模式')
     explicit_q=None if raw_q in (None,'auto') else raw_q
-    if mode=='bf16' and explicit_q not in (None,'hd'):fail(400,'BF16 使用原始 768p 配置')
-    if not brief or type(sec) is not int or not (sec==0 if kind=='image' else 15<=sec<=120) or not re.fullmatch(r'[a-zA-Z0-9-]{16,100}',req):fail(400,'请输入创意，并选择 15 至 120 秒。')
+    if not brief or type(sec) is not int or not (sec==0 if kind=='image' else sec in director.ALLOWED_SECONDS) or not re.fullmatch(r'[a-zA-Z0-9-]{16,100}',req):fail(400,'请输入创意，并选择 15、30、45、60 或 75 秒。')
     r=c.execute('SELECT * FROM jobs WHERE request=?',(req,)).fetchone()
     if r and visitor and r['visitor']!=visitor:fail(409,'请求编号不可用。')
     if r and ((r['precision'] or 'quantized')!=mode or r['brief']!=brief or r['seconds']!=sec or r['parent']!=parent or (kind=='image' and r['aspect']!=aspect) or (raw_am is not None and (r['audio_mode'] or 'auto')!=raw_am) or (explicit_q is not None and r['state']=='planning' and r['quality']!=explicit_q)):fail(409,'同一请求编号的内容不同')
