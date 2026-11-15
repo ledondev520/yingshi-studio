@@ -1,5 +1,5 @@
-"""Owner-only MP4 copies. No public storage URLs; Drive remains the source of record."""
-import contextlib, hashlib, os, re, shutil, subprocess, tempfile, threading, time
+"""Private MP4 and PNG copies. No public storage URLs; Drive remains the source of record."""
+import contextlib, hashlib, os, re, shutil, subprocess, tempfile, threading, time, zlib
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -13,8 +13,9 @@ def initialize(data):
 def driveid(r):
  m=re.fullmatch(r'https://drive\.google\.com/file/d/([A-Za-z0-9_-]{10,160})/view(?:\?usp=(?:sharing|drive_link))?',r['result'] or '')
  return m.group(1) if m and r['state']=='done' else None
-def path(data,id):return data/'media'/(hashlib.sha256(id.encode()).hexdigest()+'.mp4')
-def ready(data,r):return bool(r['media_sha'] and path(data,r['id']).is_file())
+def image_job(r):return 'precision' in r.keys() and r['precision']=='image-bf16'
+def path(data,id,image=False):return data/'media'/(hashlib.sha256(id.encode()).hexdigest()+('.png' if image else '.mp4'))
+def ready(data,r):return bool(r['media_sha'] and path(data,r['id'],image_job(r)).is_file())
 def preview_path(data,r):
  return data/'previews'/(hashlib.sha256(r['id'].encode()).hexdigest()+'-'+r['media_sha']+'-v1.mp4')
 def preview_status(data,r):
@@ -65,7 +66,7 @@ def run_previews(data,db):
   except Exception as e:print('preview queue failed:',type(e).__name__,flush=True)
   time.sleep(5)
 def pending(c,data):
- return [{'id':r['id'],'seconds':r['seconds'],'drive_id':driveid(r)} for r in c.execute("SELECT id,seconds,result,state,media_sha FROM jobs WHERE state='done' ORDER BY created DESC") if driveid(r) and not ready(data,r)][:80]
+ return [{'id':r['id'],'seconds':r['seconds'],'drive_id':driveid(r)} for r in c.execute("SELECT id,seconds,result,state,media_sha,precision FROM jobs WHERE state='done' AND COALESCE(precision,'quantized')!='image-bf16' ORDER BY created DESC") if driveid(r) and not ready(data,r)][:80]
 def boxes(f,start,end):
  pos=start;count=0
  while pos+8<=end:
@@ -95,11 +96,29 @@ def video_file(f,n):
  except (ValueError,OSError):pass
  return False
 
+def png_file(f,n):
+ try:
+  f.seek(0)
+  if f.read(8)!=b'\x89PNG\r\n\x1a\n':return False
+  pos=8;seen=False;count=0
+  while pos+12<=n:
+   size=int.from_bytes(f.read(4),'big');kind=f.read(4);count+=1
+   if count>10000 or size>32*1024*1024 or pos+size+12>n:return False
+   body=f.read(size);crc=int.from_bytes(f.read(4),'big');pos+=size+12
+   if zlib.crc32(kind+body)!=crc:return False
+   if count==1:
+    if kind!=b'IHDR' or size!=13:return False
+    w,h=int.from_bytes(body[:4],'big'),int.from_bytes(body[4:8],'big')
+    if not 0<w<=8192 or not 0<h<=8192 or w*h>16_777_216:return False
+   if kind==b'IDAT' and size:seen=True
+   if kind==b'IEND':return size==0 and pos==n and seen
+ except (OSError,ValueError):pass
+ return False
+
 def put(h,jid,data,db,worker,fail):
  worker({'worker_id':h.headers.get('X-H3-Worker-ID'),'gpu':h.headers.get('X-H3-GPU')})
  ids=parse_qs(urlsplit(h.path).query).get('drive_id',[])
  if len(ids)!=1:fail(400,'缺少对应的 Drive 文件标识')
- if h.headers.get('Content-Type','').split(';')[0]!='video/mp4':fail(415,'仅接受 MP4 视频')
  if h.headers.get('Transfer-Encoding') or not h.headers.get('Content-Length','').isdigit():fail(411,'需要文件大小')
  n=int(h.headers['Content-Length'])
  if n<=0 or n>MAX:fail(413,'MP4 大小须在 512 MiB 内')
@@ -108,6 +127,9 @@ def put(h,jid,data,db,worker,fail):
  with db() as c:
   row=c.execute('SELECT * FROM jobs WHERE id=?',(jid,)).fetchone()
   if row is None or driveid(row)!=ids[0]:fail(409,'成片与任务记录不匹配')
+  is_image=image_job(row)
+ if h.headers.get('Content-Type','').split(';')[0]!=('image/png' if is_image else 'video/mp4'):fail(415,'文件类型与任务不匹配')
+ if is_image and n>32*1024*1024:fail(413,'图片大小须在 32 MiB 内')
  if not SLOTS.acquire(blocking=False):fail(429,'正在同步其他视频，请稍后重试')
  tmp=None
  try:
@@ -123,7 +145,7 @@ def put(h,jid,data,db,worker,fail):
    got=calc.hexdigest()
    if want and got!=want:fail(422,'文件摘要校验失败')
    f.flush()
-   if not video_file(f,n):fail(422,'未检测到有效 MP4 视频轨')
+   if not (png_file(f,n) if is_image else video_file(f,n)):fail(422,'文件校验失败')
    os.fsync(f.fileno())
   with db() as c:
    row=c.execute('SELECT * FROM jobs WHERE id=?',(jid,)).fetchone()
@@ -131,7 +153,7 @@ def put(h,jid,data,db,worker,fail):
    if ready(data,row):
     if row['media_sha']!=got:fail(409,'这个任务已经同步了不同内容，请保留 Drive 原件')
    else:
-    os.replace(tmp,path(data,jid))
+    os.replace(tmp,path(data,jid,is_image))
     c.execute('UPDATE jobs SET media_sha=? WHERE id=?',(got,jid))
   return h.send(200,{'ok':True,'bytes':n,'sha256':got})
  finally:
@@ -144,7 +166,7 @@ def serve(h,jid,data,db,fail,watch_ok=False,preview=False,download=False):
   r=c.execute('SELECT * FROM jobs WHERE id=?',(jid,)).fetchone()
   if not r or (visitor and r['visitor']!=visitor) or not driveid(r) or not ready(data,r):fail(404,'此成片尚未同步站内预览')
   etag='"'+r['media_sha']+'"'
- target=path(data,jid)
+ target=path(data,jid,image_job(r))
  if preview:
   if preview_status(data,r)!='ready':fail(409,'预览版准备中，高清原片可下载')
   target=preview_path(data,r);etag='"'+r['media_sha']+'-preview-v1"'
@@ -164,9 +186,9 @@ def serve(h,jid,data,db,fail,watch_ok=False,preview=False,download=False):
     return h.send(416,{'error':'无效的字节区间'},hdr={'Content-Range':f'bytes */{size}','Accept-Ranges':'bytes'})
    partial=True
   h.send_response(206 if partial else 200)
-  h.send_header('Content-Type','video/mp4');h.send_header('Accept-Ranges','bytes');h.send_header('Content-Length',str(last-first+1));h.send_header('ETag',etag)
+  h.send_header('Content-Type','image/png' if image_job(r) else 'video/mp4');h.send_header('Accept-Ranges','bytes');h.send_header('Content-Length',str(last-first+1));h.send_header('ETag',etag)
   h.send_header('Cache-Control','private, no-cache' if preview else 'private, no-store');h.send_header('X-Content-Type-Options','nosniff');h.send_header('Cross-Origin-Resource-Policy','same-origin')
-  if download:h.send_header('Content-Disposition','attachment; filename="yingshi-'+jid+'.mp4"')
+  if download:h.send_header('Content-Disposition','attachment; filename="yingshi-'+jid+('.png' if image_job(r) else '.mp4')+'"')
   if partial:h.send_header('Content-Range',f'bytes {first}-{last}/{size}')
   h.end_headers()
   if h.command=='HEAD':return

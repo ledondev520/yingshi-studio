@@ -55,7 +55,9 @@ def ensure_folder(auth,slot):
         save(shared,{'folder':fid});slot.cache['folder']=fid;slot.persist();return fid
 def ticket(auth,job,slot):
     folder=ensure_folder(auth,slot)
-    r=auth.post('https://www.googleapis.com/upload/drive/v3/files',params={'uploadType':'resumable','fields':'id'},json={'name':'H3-'+job+'.mp4','parents':[folder]},headers={'X-Upload-Content-Type':'video/mp4'},timeout=25)
+    image=slot.cache.get('mode')=='image-bf16'
+    mime='image/png' if image else 'video/mp4'
+    r=auth.post('https://www.googleapis.com/upload/drive/v3/files',params={'uploadType':'resumable','fields':'id'},json={'name':'H3-'+job+('.png' if image else '.mp4'),'parents':[folder]},headers={'X-Upload-Content-Type':mime},timeout=25)
     r.raise_for_status();return r.headers['Location']
 def setup(c):
     c.execute('create table if not exists pool_boots(device text primary key,mode text,until integer)')
@@ -95,7 +97,7 @@ class Slot:
         ident=json.loads(self.identity.read_text());v=hashlib.sha256(ident['worker_key'].encode()).hexdigest()
         with database() as c:c.execute('insert or ignore into pairs(verifier,device,gpu,code,expiry,approved) values(?,?,?,NULL,0,1)',(v,self.device,s.accelerator))
         fc=RuntimeFiles(s);fc.upload(str(self.identity),'h3managedidentity.json')
-        fc.upload(str(DIR/('cold-bf16.py' if self.cache['mode']=='bf16' else 'cold-worker.py')),'h3managedworker.py')
+        fc.upload(str(DIR.parent/'colab-image-worker.py' if self.cache['mode']=='image-bf16' else DIR/('cold-bf16.py' if self.cache['mode']=='bf16' else 'cold-worker.py')),'h3managedworker.py')
         response=requests.get(fc.url+'/api/kernels',headers=fc.headers,timeout=(5,15));response.raise_for_status()
         if any(k.get('execution_state')=='busy' for k in response.json()):return
         # Keep provisioning responsive while the actual worker occupies its kernel.
@@ -169,10 +171,11 @@ class Slot:
             if not want:return
             mode=want;a.update(mode=mode,pending=t,retry=t+300);self.persist()
             try:
-                for model in (Accelerator.A100,Accelerator.H100,Accelerator.G4):
-                    try:machine=cl.assign(uuid.UUID(a['notebook']),Variant.GPU,model,highmem=(mode=='bf16'));break
+                models=(Accelerator.A100,Accelerator.H100) if mode=='image-bf16' else (Accelerator.A100,Accelerator.H100,Accelerator.G4)
+                for model in models:
+                    try:machine=cl.assign(uuid.UUID(a['notebook']),Variant.GPU,model,highmem=(mode in ('bf16','image-bf16')));break
                     except Capacity:
-                        if model==Accelerator.G4:raise
+                        if model==models[-1]:raise
             except Capacity:
                 a.pop('pending',None);self.persist()
                 with database() as c:
