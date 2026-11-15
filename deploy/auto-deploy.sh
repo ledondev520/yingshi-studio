@@ -89,6 +89,7 @@ printf '%s\n' "$REMOTE_SHA" > "$STAGE_DIR.tmp/.deployed-sha"
 echo "[h3-deploy] Running pre-deploy validation checks..."
 (
   cd "$STAGE_DIR.tmp"
+  python3 validate_previews.py >/dev/null
   python3 validate_pool.py >/dev/null
   python3 validate_scale.py >/dev/null
   python3 validate_launch.py >/dev/null

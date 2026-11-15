@@ -59,6 +59,7 @@ python3 server.py
 以下测试使用临时 SQLite，不分配 GPU、不调用付费模型：
 
 ```bash
+python3 validate_previews.py # 需要本机 ffmpeg / ffprobe（libx264、AAC）
 python3 validate_pool.py
 python3 validate_scale.py
 python3 validate_multiuser.py
@@ -89,3 +90,11 @@ python3 validate_relay.py /path/to/small-test.mp4
 显卡租约失效后保留已完成片段并重新排队，不因累计三次断线直接作废；模型实际报错仍按失败处理。没有每日算力预算或任务完成次数限制，有需求就持续使用已获批算力；库存、账号额度或付费单元不足时任务保存并重试。`validate_multiuser.py` 验证十用户、32 路领取、身份隔离、机型准入、断线重排及队列边界；`autowake/check.py` 以模拟云端验证 32 个申请槽，不消耗算力。
 
 短暂断网、429 和服务端暂时错误时，主卡带原租约重连，副卡保留原分镜票据；无需等待租约超时即可续跑，完成后继续领取下一条。实际渲染错误仍标为失败，不做无休止重算。
+
+## 在线预览与高清下载
+
+原片上传并校验后即保存，下载和续拍始终读取原片。Web 服务另用 FFmpeg 在 CPU 上串行生成轻量预览，不重新调用模型；启动后也会补齐已有成片。需安装 `ffmpeg` / `ffprobe` 并启用 libx264、AAC 编码器。
+
+预览按原画幅缩至 1280×720 或 720×1280 以内（不放大），使用 H.264 CRF 26、最高目标码率 2.5 Mbps、AAC 96 kbps、每 2 秒关键帧和 faststart；压缩结果更大时保留原文件大小。限制两条编码线程、降低进程优先级，单次超时 15 分钟，失败至少等 5 分钟再试。预览临时文件验证后原子发布，原片从不覆盖；服务重启可继续补齐。
+
+`/api/preview/<id>` 与原片接口共享鉴权、Range 和 HEAD；仅私有缓存且每次复验权限。准备中或失败会显示状态，并始终提供高清原片下载。`validate_previews.py` 验证真实转码、新上传与旧片补齐、失败重试、原片完整性和权限隔离。

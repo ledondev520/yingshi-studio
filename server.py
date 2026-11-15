@@ -78,6 +78,7 @@ def jobrow(r,internal=False,c=None):
  x['precision']=r['precision'] or 'quantized'
  x['audio_mode']=r['audio_mode'] or 'original';x['quality']=r['quality'] or 'standard';x['shots']=json.loads(r['shots']);x['result_url']=r['result'] or '';x['parent']=r['parent'] or '';x['brief']=r['brief'] or r['prompt']
  x['media_ready']=media.ready(DATA,r) if r['state']=='done' else False
+ x['preview_status']=media.preview_status(DATA,r) if x['media_ready'] else None
  x['total_seconds']=(r['total_seconds'] if 'total_seconds' in r.keys() else None) or r['seconds']
  x['append_source']=bool(x['parent'] and x['total_seconds']>x['seconds'])
  x['route']=r['route'];x['model']=r['director_model']
@@ -171,7 +172,9 @@ class Handler(BaseHTTPRequestHandler):
   parts=urlsplit(self.path);p=parts.path;qs=parse_qs(parts.query)
   qtoken=(qs.get('token') or [self.headers.get('X-H3-Watch-Token','')])[0]
   m=re.fullmatch(r'/api/media/([A-Za-z0-9_-]{1,120})',p)
-  if m and self.command in ('GET','HEAD'):return media.serve(self,m[1],DATA,db,fail,watch_ok=valid_watch(m[1],qtoken))
+  if m and self.command in ('GET','HEAD'):return media.serve(self,m[1],DATA,db,fail,watch_ok=valid_watch(m[1],qtoken),download=qs.get('download')==['1'])
+  m=re.fullmatch(r'/api/preview/([A-Za-z0-9_-]{1,120})',p)
+  if m and self.command in ('GET','HEAD'):return media.serve(self,m[1],DATA,db,fail,watch_ok=valid_watch(m[1],qtoken),preview=True)
   checkpoint=re.fullmatch(r'/api/worker/media/checkpoint/([A-Za-z0-9_-]{1,120})/([0-9]{1,2})',p)
   if checkpoint and self.command in ('PUT','GET','HEAD'):return checkpoints.serve(self,checkpoint[1],int(checkpoint[2]),DATA,db,fail)
   relay=re.fullmatch(r'/api/worker/media/shot/([0-9a-f]{32})',p)
@@ -424,6 +427,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__=='__main__':
  import signal
  setup();threading.Thread(target=run_planner,daemon=True).start()
+ threading.Thread(target=media.run_previews,args=(DATA,db),daemon=True).start()
  srv=ThreadingHTTPServer(('127.0.0.1',PORT),Handler)
  for sig in (signal.SIGTERM,signal.SIGINT):
   signal.signal(sig,lambda *_:threading.Thread(target=srv.shutdown,daemon=True).start())

@@ -89,7 +89,7 @@ function renderJobs(){
   const title=(j.parent?'↳ ':'')+(j.brief||j.prompt);mid.append(tx('strong',title.length>90?title.slice(0,90)+'…':title));
   mid.append(tx('small',[detailDate(j.created),modeLabel(j.precision),(j.total_seconds||j.seconds)+' 秒',j.quality==='hd'?'高清 768p':j.quality==='fast'?'快速预览':'',j.shots.length+' 镜',j.message].filter(Boolean).join(' · ')));
   if(j.state==='running')runningDetail(j,mid);
-  if(j.state==='done'&&j.media_ready){const pb=tx('button','播放成片');pb.onclick=()=>openPreview(j);right.append(pb);
+  if(j.state==='done'&&j.media_ready){const pb=tx('button',j.preview_status==='ready'?'播放预览':'查看成片');pb.onclick=()=>openPreview(j);right.append(pb);
    const f=tx('button','接着续拍');f.onclick=()=>{if($('prompt').value.trim()&&$('prompt').value!==j.brief&&!confirm('从这条成片的结尾续拍？'))return;watchToken++;modelMode=j.precision==='bf16'?'bf16':'quantized';paintMode();parentId=j.id;$('prompt').value='';shots=[];paintReply();changed();renderShots();$('workMsg').textContent='写下接下来发生什么，所选时长是新增长度。';$('prompt').focus()};right.append(f)
   }else if(j.state==='done')right.append(tx('small','成片同步中','muted'));
   if(j.state==='queued'){const b=tx('button','取消排队');b.onclick=async()=>{try{const tok=j.watch_token||jobToken(j.id);await api('cancel',{id:j.id,...(tok?{watch_token:tok}:{})});await refresh()}catch(e){$('workMsg').textContent=e.message}};right.append(b)}
@@ -111,7 +111,7 @@ async function recoverGuestJobs(current){
  return merged;
 }
 async function refresh(first=false){
- try{const d=await api('state'),prev=role;if(Number.isFinite(d.now))serverClockOffset=d.now-Math.floor(Date.now()/1000);showRole(d.role||'guest');const owner=role==='owner';rememberJobs(d.jobs||[]);jobs=owner?(d.jobs||[]):await recoverGuestJobs(d.jobs||[]);rememberJobs(jobs);const w=d.worker||{};onlineModes=d.online_modes||null;paintMode();$('gpu').textContent=w.online?w.gpu:'云端 GPU 离线';$('workerSeen').textContent=workerLabel(w);if(first||prev!==role){const local=localRead('draft',null),draft=owner?(d.draft||(local?{...local,parent:''}:null)):local;paintPrompt(draft);$('draftStatus').textContent=draft?'草稿已恢复':'自动保存草稿';if(owner&&!d.draft&&draft)changed();const current=jobs.find(j=>['planning','queued','running'].includes(j.state));if(current)watchJob(current)}renderJobs();if(first)$('submit').disabled=false}catch(e){$('workerSeen').textContent='网络中断，正在重试'}
+ try{const d=await api('state'),prev=role;if(Number.isFinite(d.now))serverClockOffset=d.now-Math.floor(Date.now()/1000);showRole(d.role||'guest');const owner=role==='owner';rememberJobs(d.jobs||[]);jobs=owner?(d.jobs||[]):await recoverGuestJobs(d.jobs||[]);rememberJobs(jobs);const w=d.worker||{};onlineModes=d.online_modes||null;paintMode();$('gpu').textContent=w.online?w.gpu:'云端 GPU 离线';$('workerSeen').textContent=workerLabel(w);if(first||prev!==role){const local=localRead('draft',null),draft=owner?(d.draft||(local?{...local,parent:''}:null)):local;paintPrompt(draft);$('draftStatus').textContent=draft?'草稿已恢复':'自动保存草稿';if(owner&&!d.draft&&draft)changed();const current=jobs.find(j=>['planning','queued','running'].includes(j.state));if(current)watchJob(current)}renderJobs();if(previewJob){const current=jobs.find(j=>j.id===previewJob);if(current)renderPreview(current)}if(first)$('submit').disabled=false}catch(e){$('workerSeen').textContent='网络中断，正在重试'}
 }
 function newInput(){++watchToken;activeJob='';shots=[];$('workMsg').textContent='';renderShots();changed()}
 $('prompt').oninput=newInput;
@@ -128,8 +128,19 @@ async function boot(){const hash=new URLSearchParams(location.hash.slice(1));con
 window.addEventListener('hashchange',()=>{if(location.hash.startsWith('#activate=')||location.hash.startsWith('#job='))boot()});boot();setInterval(()=>{if(!document.hidden)refresh(!logged)},5000);
 
 
-function openPreview(j){if(!j.media_ready||!j.id)return;const tok=j.watch_token||jobToken(j.id),v=document.createElement('video');v.src='api/media/'+encodeURIComponent(j.id)+(tok?'?token='+encodeURIComponent(tok):'');v.controls=true;v.playsInline=true;v.preload='metadata';v.setAttribute('aria-label',j.brief||'成片预览');$('frame').replaceChildren(v);$('downloadFilm').href=v.src;$('downloadFilm').download='映室-'+j.id.slice(0,8)+'.mp4';$('preview').showModal();v.play().catch(()=>{})}
-$('closePreview').onclick=()=>$('preview').close();$('preview').onclose=()=>$('frame').replaceChildren();
+let previewJob='';
+function mediaUrl(j,preview=false){const tok=j.watch_token||jobToken(j.id);return 'api/'+(preview?'preview/':'media/')+encodeURIComponent(j.id)+(tok?'?token='+encodeURIComponent(tok):'')}
+function renderPreview(j){
+ const frame=$('frame'),state=j.preview_status||'pending',key=j.id+':'+state;if(frame.dataset.preview===key)return;frame.dataset.preview=key;
+ const url=mediaUrl(j);$('downloadFilm').href=url+(url.includes('?')?'&':'?')+'download=1';$('downloadFilm').download='映室-'+j.id.slice(0,8)+'.mp4';
+ $('previewStatus').textContent=state==='ready'?'轻量预览 · 下载可获取高清原片。':state==='failed'?'预览暂不可用，后台会重试；高清原片可直接下载。':'预览版准备中，完成后即可播放；高清原片已保存，可直接下载。';
+ frame.replaceChildren();if(state!=='ready')return;
+ const v=document.createElement('video');v.src=mediaUrl(j,true);v.controls=true;v.playsInline=true;v.preload='metadata';v.setAttribute('aria-label',j.brief||'成片预览');
+ v.onerror=()=>{$('previewStatus').textContent='预览加载失败，请关闭后重试，或下载高清原片。'};frame.append(v);v.play().catch(()=>{});
+}
+function openPreview(j){if(!j.media_ready||!j.id)return;previewJob=j.id;renderPreview(j);$('preview').showModal()}
+$('closePreview').onclick=()=>$('preview').close();$('preview').onclose=()=>{previewJob='';$('frame').replaceChildren();delete $('frame').dataset.preview};
+
 
 function paintReply(){$('lengthLabel').textContent=parentId?'新增时长':'成片时长';const j=jobs.find(x=>x.id===parentId);$('reply').hidden=!parentId;$('replyText').textContent=parentId?'从原片结尾续拍 · '+((j?.brief||j?.prompt||'已保存的创意').slice(0,38)):'';$('prompt').placeholder=parentId?'写接下来发生什么，例如：镜头靠近，两人听着雨声一起笑。':'比如：大雨敲着窗，家里的橘猫和雪纳瑞围着仙女棒聊天。让我们听见雨声和它们的对白。'}
 $('newIdea').onclick=()=>{parentId='';paintReply();changed()};
