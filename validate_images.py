@@ -47,6 +47,10 @@ def run():
    saved,h=req('media/'+job['id'],cookie=cookie);assert saved==png and h['Content-Type']=='image/png'
    assert req('media/'+job['id']+'?token='+j['watch_token'])[0]==png
    assert req('creation/'+j['id'],cookie=cookie)[0]['job']['media_ready']
+   assert not server.media.run_preview_once(server.DATA,server.db), 'PNG must not enter video transcoding'
+   req('preview/'+job['id'],cookie=cookie,status=409)
+   downloaded,head=req('media/'+job['id']+'?download=1',cookie=cookie)
+   assert downloaded==png and '.png' in head['Content-Disposition']
    from image_director import validate
    assert validate({'description':'茶馆','prompt':'A detailed visual scene. '*15},'square')['shots'][0]['width']==2048
    for bad in ({},{'description':'茶馆','prompt':'short'},{'description':'茶馆','prompt':42}):
