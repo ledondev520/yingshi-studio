@@ -45,7 +45,10 @@ for d in (models,videos):d.mkdir(parents=True,exist_ok=True)
     download="        hf_hub_download(repo_id='Comfy-Org/MiniMax-H3'"
     # shortcut: only pinned quantized video weights are cached; add a BF16 manifest before caching BF16.
     assert s.count(download)==1
-    s=s.replace(download,"        if not restore_cached_model(path, name, BASE, token, did, gpu_present):\n    "+download)
+    s=s.replace(download,"        try:\n    "+download)
+    size_check='        assert path.stat().st_size == size, name'
+    assert s.count(size_check)==1
+    s=s.replace(size_check,"            assert path.stat().st_size == size, name\n        except Exception:\n            if not restore_cached_model(path, name, BASE, token, did, gpu_present):\n                raise")
     assert s.count('    for name, size in files.items():')==1
     s=s.replace('    for name, size in files.items():','    def prepare_model(pair):\n        name, size = pair')
     s=s.replace("            print('复用：', name)\n            continue","            print('复用：', name)\n            return")

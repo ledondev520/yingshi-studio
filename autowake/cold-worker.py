@@ -271,9 +271,12 @@ else:
         if path.is_file() and path.stat().st_size == size:
             print('复用：', name)
             return
-        if not restore_cached_model(path, name, BASE, token, did, gpu_present):
+        try:
             hf_hub_download(repo_id='Comfy-Org/MiniMax-H3', revision='54472221d27c695fca9621b0c3ed52f06c4af707', filename=name, local_dir=str(models), force_download=path.exists(), token=False)
-        assert path.stat().st_size == size, name
+            assert path.stat().st_size == size, name
+        except Exception:
+            if not restore_cached_model(path, name, BASE, token, did, gpu_present):
+                raise
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(2) as downloads:
         list(downloads.map(prepare_model, files.items()))
