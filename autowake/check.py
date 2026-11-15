@@ -107,3 +107,21 @@ def quota_feedback():
             assert c.execute('select stage from pool_signal').fetchone()[0]=='limit'
  print('PASS planning preflight, A100/G4/H100 order, limit feedback survives backoff')
 if __name__=='__main__':quota_feedback()
+
+def lost_runtime_reschedules():
+ with tempfile.TemporaryDirectory() as tmp:
+    root=Path(tmp);server.DATA=root;server.setup();m.DB=root/'studio.sqlite';m.PRIVATE=root;m.TOKEN=root/'token';m.TOKEN.touch()
+    cl=Mock();gone=RuntimeError('runtime removed');gone.response=Mock(status_code=404);cl.get.side_effect=gone
+    with patch.object(m,'StateStore'),patch.object(m,'creds'),patch.object(m,'PublicColab',return_value=cl):
+        slot=m.Slot(0);slot.cache.update(endpoint='gone',mode='quantized',born=1,last=1)
+        with m.database() as c:
+            m.setup(c)
+            for ident,wid in [('ours',slot.device+'/gpu'),('other','other-device/gpu')]:
+                c.execute("insert into jobs(id,shots,seconds,state,route,prompt,wid,lease,deadline,tries) values(?,'[]',15,'running','continuous','t',?,'lease',?,4)",(ident,wid,int(time.time())+600))
+        slot.step()
+        with m.database() as c:
+            assert tuple(c.execute("select state,lease,wid,tries from jobs where id='ours'").fetchone())==('queued',None,None,4)
+            assert c.execute("select state from jobs where id='other'").fetchone()[0]=='running'
+    cl.assign.assert_not_called()
+ print('PASS a confirmed missing runtime requeues its own job immediately without waiting for its lease')
+if __name__=='__main__':lost_runtime_reschedules()

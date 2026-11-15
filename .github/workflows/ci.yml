@@ -68,4 +68,5 @@ jobs:
           check.run()
           check.multiuser_pool()
           check.quota_feedback()
+          check.lost_runtime_reschedules()
           PY
