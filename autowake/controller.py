@@ -14,9 +14,39 @@ import fleet,shot_relay,preparation
 DATA=Path(os.environ.get('H3_DATA','/var/lib/h3-studio'));PRIVATE=Path.home()
 DB=DATA/'studio.sqlite';TOKEN=PRIVATE/'.config/colab-cli/token.json'
 CLI='/opt/h3-studio/autowake-venv/bin/colab'
-IDLE=600;BOOT=1500
+IDLE=300;BOOT=900;LIMIT_RETRY=45
 def save(path,v):
     tmp=path.with_suffix('.tmp');tmp.write_text(json.dumps(v));tmp.replace(path)
+def claimed_endpoints():
+    claimed=set()
+    for p in PRIVATE.glob('wake*.json'):
+        try:d=json.loads(p.read_text())
+        except Exception:continue
+        if d.get('endpoint'):claimed.add(d['endpoint'])
+        if d.get('pending') and d.get('notebook'):
+            try:claimed.add('runtimes/h3-'+uuid.UUID(str(d['notebook'])).hex[:24])
+            except ValueError:pass
+    return claimed
+def evict_orphans(cl):
+    try:items=cl.list_assignments()
+    except Exception:return 0
+    if not isinstance(items,(list,tuple)):return 0
+    candidates=[getattr(x,'endpoint','') for x in items]
+    orphans=[ep for ep in candidates if isinstance(ep,str) and re.fullmatch(r'runtimes/h3-[0-9a-f]{24}',ep) and ep not in claimed_endpoints()]
+    if not orphans:return 0
+    freed=0
+    for ep in orphans:
+        if ep in claimed_endpoints():continue
+        try:
+            cl.unassign(ep);freed+=1
+            print('reclaimed orphan runtime',ep,flush=True)
+        except Exception as e:
+            print('orphan release skipped',ep,type(e).__name__,flush=True)
+    if freed:
+        with database() as c:
+            c.execute('delete from pool_retry')
+            c.execute("delete from pool_signal where stage in ('limit','denied')")
+    return freed
 @contextlib.contextmanager
 def database():
     c=sqlite3.connect(DB,timeout=15,isolation_level=None);c.row_factory=sqlite3.Row
@@ -76,8 +106,8 @@ def working(c,device,t):
     helping=bool(c.execute("""select 1 from shot_tasks s join jobs j on j.id=s.job_id and j.lease=s.epoch
        where j.state='running' and s.state='taken' and s.deadline>=? and instr(s.helper,?)=1""",(t,prefix)).fetchone())
     return parents,helping
-def choose(c,device,t,owned_mode=None):
-    needs=deficit(c,device,t)
+def choose(c,device,t,owned_mode=None,needs=None):
+    if needs is None:needs=deficit(c,device,t)
     if owned_mode:return owned_mode if owned_mode in needs else None
     return next((m for m in needs if not c.execute('select 1 from pool_retry where mode=? and until>?',(m,t)).fetchone()),None)
 class Slot:
@@ -86,7 +116,8 @@ class Slot:
         self.name='h3-autowake'+suffix;self.device='h3-autowake-service'+suffix
         self.path=PRIVATE/('wake'+suffix+'.json');self.identity=PRIVATE/('worker'+suffix+'.json')
         self.cache=json.loads(self.path.read_text()) if self.path.exists() else {'notebook':str(uuid.uuid4())}
-        self.cache.setdefault('mode','quantized');self.store=StateStore();self.link=None;self.persist()
+        self.cache.setdefault('mode','quantized');self.store=StateStore();self.link=None
+        self.boot_mono=time.monotonic();self.last_sweep=0;self.persist()
     def persist(self):save(self.path,self.cache)
     def register(self,a):
         info=a.runtime_proxy_info;s=SessionState(name=self.name,endpoint=a.endpoint,token=info.token,url=info.url,accelerator=a.accelerator.value)
@@ -123,7 +154,7 @@ class Slot:
         if code:raise RuntimeError('kernel launch failed')
     def clear(self):
         if self.link:self.link.close();self.link=None
-        for k in ('endpoint','pending','sent','born','launched','last','mode','external','retry'):self.cache.pop(k,None)
+        for k in ('endpoint','pending','sent','born','launched','last','mode','external','retry','crashes'):self.cache.pop(k,None)
         self.persist()
         if self.store.get(self.name):self.store.remove(self.name)
         with database() as c:
@@ -147,7 +178,11 @@ class Slot:
         except Exception:
             with database() as c:c.execute('delete from worker_drain where device=?',(self.device,))
             raise
-        self.clear();print(self.name,'released runtime',reason,flush=True)
+        self.clear()
+        with database() as c:
+            c.execute('delete from pool_retry')
+            c.execute("delete from pool_signal where stage in ('limit','denied')")
+        print(self.name,'released runtime',reason,flush=True)
     def step(self):
         t=int(time.time());a=self.cache;owned=a.get('endpoint');mode=a.get('mode','quantized');wid=self.device
         with database() as c:
@@ -156,7 +191,11 @@ class Slot:
                 shot_relay.gc(c,DATA,t)
             live=online(c,wid,t)
             mine,helps=working(c,wid,t)
-            want=choose(c,wid,t,mode if owned or a.get('pending') else None)
+            needs=deficit(c,wid,t)
+            want=choose(c,wid,t,mode if owned or a.get('pending') else None,needs)
+            limited_any=bool(c.execute("select 1 from pool_signal where stage='limit' and until>?",(t,)).fetchone())
+            other_demand=bool(needs) or limited_any
+            prep_failed=bool(c.execute("select 1 from pool_preparation where device=? and stage='failed'",(wid,)).fetchone())
             if not TOKEN.exists():return
             if live:
                 c.execute('delete from pool_signal where device=?',(wid,))
@@ -164,15 +203,23 @@ class Slot:
             elif not want:
                 c.execute("delete from pool_signal where device=? and stage NOT IN ('denied','limit')",(wid,))
                 c.execute('delete from pool_boots where device=?',(wid,))
-            if not owned and not a.get('pending') and (not want or a.get('retry',0)>t):return
+            if not owned and not a.get('pending') and not want:
+                if self.index==0 and time.monotonic()-self.boot_mono>=15 and t-self.last_sweep>=180:
+                    self.last_sweep=t;evict_orphans(PublicColab(creds()))
+                return
+            if not owned and not a.get('pending') and a.get('retry',0)>t:return
             if not live and want:
                 c.execute('insert or replace into pool_signal values(?,?,?,?)',(wid,want,'loading' if owned else 'request',t+600))
                 c.execute('insert or replace into pool_boots values(?,?,?)',(wid,want,t+600))
-            playback=c.execute("select 1 from jobs where instr(wid,?||'/')=1 and state='done' and media_sha is null and updated>? limit 1",(wid,t-1800)).fetchone()
+            playback_win=45 if (not want and other_demand) else 180
+            playback=c.execute("select 1 from jobs where instr(wid,?||'/')=1 and state='done' and media_sha is null and updated>? limit 1",(wid,t-playback_win)).fetchone()
+        if live and a.get('crashes'):a.pop('crashes',None);self.persist()
         if mine or helps or playback:a['last']=t;self.persist()
+        idle_ttl=0 if (not want and other_demand) else (45 if not live else IDLE)
+        crashed_out=not live and prep_failed and a.get('crashes',0)>=1
         unsent=[j for j in mine if j not in a.get('sent',[])]
-        if owned and live and self.connected(owned) and not unsent and (mine or helps or playback or t-a.get('last',t)<IDLE):return
-        if owned and not live and want and t-a.get('launched',0)<150:return
+        if owned and live and self.connected(owned) and not unsent and (mine or helps or playback or want or t-a.get('last',t)<idle_ttl):return
+        if owned and not live and want and not crashed_out and t-a.get('launched',0)<(45 if prep_failed else 150):return
         auth=creds();cl=PublicColab(auth)
         ep=owned or ('runtimes/h3-'+uuid.UUID(a['notebook']).hex[:24] if a.get('pending') else None)
         machine=None
@@ -186,37 +233,54 @@ class Slot:
                     if t-a.get('pending',t)>600:self.clear()
                     return
                 if t<a.get('retry',0):return
-        if machine and not owned:a.update(endpoint=machine.endpoint,born=t,last=t,launched=0);owned=machine.endpoint;self.persist()
+        if machine and not owned:a.pop('pending',None);a.update(endpoint=machine.endpoint,born=t,last=t,launched=0,crashes=0);owned=machine.endpoint;self.persist()
         if not machine:
             if not want:return
             mode=want;a.update(mode=mode,pending=t,retry=t+300);self.persist()
+            models=(Accelerator.H100,Accelerator.A100) if mode in ('bf16','image-bf16') else (Accelerator.H100,Accelerator.A100,Accelerator.G4)
+            highmem=(mode in ('bf16','image-bf16'))
+            def _try_assign():
+                lim=False
+                for model in models:
+                    try:return cl.assign(uuid.UUID(a['notebook']),Variant.GPU,model,highmem=highmem),lim
+                    except Capacity as exc:
+                        lim=lim or str(exc)=='TOO_MANY_ACTIVE_RUNTIMES'
+                        if model==models[-1]:raise Capacity('TOO_MANY_ACTIVE_RUNTIMES' if lim else str(exc)) from exc
+                return None,lim
             limited=False
             try:
-                models=(Accelerator.A100,Accelerator.H100) if mode=='image-bf16' else (Accelerator.A100,Accelerator.G4,Accelerator.H100)
-                for model in models:
-                    try:machine=cl.assign(uuid.UUID(a['notebook']),Variant.GPU,model,highmem=(mode in ('bf16','image-bf16')));break
-                    except Capacity as exc:
-                        limited=limited or str(exc)=='TOO_MANY_ACTIVE_RUNTIMES'
-                        if model==models[-1]:raise
-            except Capacity:
-                a.pop('pending',None);self.persist()
+                try:
+                    machine,limited=_try_assign()
+                except Capacity as exc:
+                    limited=str(exc)=='TOO_MANY_ACTIVE_RUNTIMES'
+                    if limited and evict_orphans(cl)>0:
+                        limited=False
+                        machine,limited=_try_assign()
+                    else:
+                        raise
+            except Capacity as exc:
+                limited=limited or str(exc)=='TOO_MANY_ACTIVE_RUNTIMES'
+                backoff=LIMIT_RETRY if limited else 300
+                a.pop('pending',None);a.pop('retry',None);self.persist()
                 with database() as c:
                     c.execute('delete from pool_boots where device=?',(wid,))
-                    c.execute('insert or replace into pool_retry values(?,?)',(mode,int(time.time())+300))
+                    c.execute('insert or replace into pool_retry values(?,?)',(mode,int(time.time())+backoff))
                     c.execute('insert or replace into pool_signal values(?,?,?,?)',(wid,mode,'limit' if limited else 'denied',int(time.time())+300))
                 print(self.name,mode,'capacity refused; existing workers continue',flush=True);return
             with database() as c:c.execute('insert or replace into pool_signal values(?,?,?,?)',(wid,mode,'loading',int(time.time())+600))
             print(self.name,mode,machine.accelerator.value,'runtime allocated',flush=True)
-            owned=machine.endpoint;a.update(endpoint=owned,born=t,last=t,launched=0,sent=[]);self.persist()
-        if not mine and not helps and not playback and ((not want and t-a.get('last',t)>=IDLE) or (not live and t-a.get('born',t)>BOOT)):
-            broken=not live and t-a.get('born',t)>BOOT and bool(want)
-            self.release(cl,owned,'startup-timeout' if not live and t-a.get('born',t)>BOOT else 'idle')
+            owned=machine.endpoint;a.pop('pending',None);a.pop('retry',None);a.update(endpoint=owned,born=t,last=t,launched=0,crashes=0,sent=[]);self.persist()
+        if not mine and not helps and not playback and ((not want and t-a.get('last',t)>=idle_ttl) or (not live and (crashed_out or t-a.get('born',t)>BOOT))):
+            broken=not live and (crashed_out or t-a.get('born',t)>BOOT) and bool(want)
+            reason='preempt' if (not want and other_demand) else ('worker-crashed' if crashed_out else ('startup-timeout' if not live and t-a.get('born',t)>BOOT else 'idle'))
+            self.release(cl,owned,reason)
             if broken and not a.get('endpoint'):
-                with database() as c:c.execute('insert or replace into pool_retry values(?,?)',(mode,t+1800))
+                with database() as c:c.execute('insert or replace into pool_retry values(?,?)',(mode,t+(60 if crashed_out else 1800)))
             return
         if live and not self.connected(owned):self.attach(self.register(machine))
-        if not live and (want or mine or helps) and time.time()-a.get('launched',0)>150:
+        if not live and (want or mine or helps) and time.time()-a.get('launched',0)>(45 if prep_failed else 150):
             try:
+                if prep_failed:a['crashes']=a.get('crashes',0)+1
                 self.initialize(self.register(machine))
                 a['launched']=time.time();self.persist()
             except Exception:

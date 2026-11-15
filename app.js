@@ -435,7 +435,9 @@ function conciseQueueMsg(j) {
   const prefix = j.recovering ? 'GPU 断线自动恢复 · ' : '';
   const pos = j.queue_position ? `第 ${j.queue_position} 位 · ` : '';
   if (msg.includes('即将接单')) return prefix + pos + 'GPU 就绪，即将开始';
-  if (msg.includes('运行时已达上限')) return prefix + pos + '算力名额已满，等待空闲卡接单';
+  if (msg.includes('运行时已达上限')) {
+    return prefix + pos + '账号 3 卡名额已满（自动腾退闲置卡中；若浏览器开有手动 Colab 页可关闭释放）';
+  }
   if (msg.includes('准备模型') || msg.includes('加载模型')) return prefix + pos + '正在加载模型，稍后自动开始';
   if (msg.includes('前序任务') || msg.includes('在线渲染')) return prefix + pos + '前序任务生成中，空闲后自动接单';
   if (msg.includes('额度受限')) return prefix + pos + '云端算力繁忙，已保存并自动重试';

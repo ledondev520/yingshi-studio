@@ -15,7 +15,7 @@ config=json.loads(exchange('h3managedidentity.json').read_text())
 token=config['worker_key'];did=config['worker_id'];BASE='https://withkeya.com/h3-studio'
 gpu_present=subprocess.check_output(['nvidia-smi','--query-gpu=name','--format=csv,noheader'],text=True).strip()
 if not re.search(r'\\b(?:[AH]100|G4|RTX\\s+PRO\\s+6000\\s+Blackwell)\\b',gpu_present): raise RuntimeError('unsupported GPU')
-ROOT=root=Path('/content/h3-managed-data');root.mkdir(exist_ok=True)
+ROOT=root=(Path('/mnt/local-scratch') if Path('/mnt/local-scratch').is_mount() else Path('/content'))/'h3-managed-data';root.mkdir(parents=True,exist_ok=True)
 models, videos=root/'models', root/'videos'
 mounted=Path('/content/drive/MyDrive/MiniMax-H3/models')
 if mounted.is_dir():models=mounted
@@ -54,7 +54,7 @@ for d in (models,videos):d.mkdir(parents=True,exist_ok=True)
     assert s.count('    for name, size in files.items():')==1
     s=s.replace('    for name, size in files.items():','    _preparation.weights(models,files)\n    def prepare_model(pair):\n        name, size = pair')
     s=s.replace("            print('复用：', name)\n            continue","            print('复用：', name)\n            return")
-    s=s.replace("    print('四个文件已就绪')","    from concurrent.futures import ThreadPoolExecutor\n    with ThreadPoolExecutor(2) as downloads:\n        list(downloads.map(prepare_model, files.items()))\n    print('四个文件已就绪')\n    _preparation.stage('environment')")
+    s=s.replace("    print('四个文件已就绪')","    from concurrent.futures import ThreadPoolExecutor\n    with ThreadPoolExecutor(4) as downloads:\n        list(downloads.map(prepare_model, files.items()))\n    print('四个文件已就绪')\n    _preparation.stage('environment')")
     s=s.replace("    print('准备完成')","    print('准备完成')\n    _preparation.stage('ready')")
     s=s.replace('    g=copy.deepcopy(graph);',"    _preparation.stage('loading')\n    g=copy.deepcopy(graph);")
     s=s.replace("send('/api/worker/sampler',v);last=v;","send('/api/worker/sampler',v);_preparation.stage('ready');last=v;")
