@@ -4,6 +4,7 @@ import threading
 import media
 import checkpoints
 import director
+import image_director
 import sampling
 import shot_tasks, fleet, shot_relay
 import base64, contextlib, hashlib, hmac, json, os, re, secrets, sqlite3, time, uuid
@@ -60,7 +61,7 @@ def setup():
   fleet.setup(c);shot_relay.setup(c)
   cols={r[1] for r in c.execute('PRAGMA table_info(jobs)')}
   if 'total_seconds' not in cols:c.execute('ALTER TABLE jobs ADD COLUMN total_seconds INTEGER')
-  for k in ('visitor','parent','brief','media_sha','quality','route','director_model','audio_mode','precision'):
+  for k in ('visitor','parent','brief','media_sha','quality','route','director_model','audio_mode','precision','aspect'):
    if k not in cols:c.execute('ALTER TABLE jobs ADD COLUMN '+k+' TEXT')
 class Problem(Exception):
  def __init__(self,code,msg):super().__init__(msg);self.code=code
@@ -69,13 +70,14 @@ def s(a,n):return a.strip()[:n] if isinstance(a,str) else ''
 def vidlink(u):return isinstance(u,str) and re.fullmatch(r'https://drive\.google\.com/file/d/[\w-]{10,160}/view(?:\?usp=(?:sharing|drive_link))?',u)
 def precision(d):
  v=d.get('precision','quantized')
- if v not in ('quantized','bf16'):fail(400,'无效的生成模型')
+ if v not in ('quantized','bf16','image-bf16'):fail(400,'无效的生成模型')
  return v
 def online_modes(c):
  return [r[0] for r in c.execute("SELECT DISTINCT COALESCE(m.precision,'quantized') FROM workers w LEFT JOIN worker_modes m ON m.id=w.id WHERE w.seen>?",(now()-100,))]
 def jobrow(r,internal=False,c=None):
  x={k:r[k] for k in ('id','prompt','seconds','state','progress','message','created','updated','gpu')}
  x['precision']=r['precision'] or 'quantized'
+ x['kind']='image' if x['precision']=='image-bf16' else 'video';x['aspect']=r['aspect'] or 'square'
  x['audio_mode']=r['audio_mode'] or 'original';x['quality']=r['quality'] or 'standard';x['shots']=json.loads(r['shots']);x['result_url']=r['result'] or '';x['parent']=r['parent'] or '';x['brief']=r['brief'] or r['prompt']
  x['media_ready']=media.ready(DATA,r) if r['state']=='done' else False
  x['preview_status']=media.preview_status(DATA,r) if x['media_ready'] else None
@@ -103,7 +105,7 @@ def cleanup(c):
 plan_wake=threading.Event()
 def run_planner():
  while True:
-  with db() as c:r=c.execute("SELECT id,prompt,seconds,precision,quality,audio_mode FROM jobs WHERE state='planning' ORDER BY created,rowid LIMIT 1").fetchone()
+  with db() as c:r=c.execute("SELECT id,prompt,seconds,precision,quality,audio_mode,aspect FROM jobs WHERE state='planning' ORDER BY created,rowid LIMIT 1").fetchone()
   if not r:
    plan_wake.wait(2);plan_wake.clear();continue
   start=time.monotonic(); first=None; last=0
@@ -115,9 +117,9 @@ def run_planner():
    last=t
    with db() as c:c.execute("UPDATE jobs SET shots=?,updated=?,message=? WHERE id=? AND state='planning'",(pack([{'prompt':x,'seconds':0} for x in parts]),now(),'正在写第 '+str(len(parts))+' 段分镜',r['id']))
   try:
-   result=director.plan(dict(r),KEYS,fail,progress)
+   result=image_director.plan(dict(r),KEYS,fail) if r['precision']=='image-bf16' else director.plan(dict(r),KEYS,fail,progress)
    qual='hd' if r['precision']=='bf16' else (r['quality'] or result['quality'])
-   with db() as c:c.execute("UPDATE jobs SET shots=?,quality=?,audio_mode=COALESCE(audio_mode,'auto'),route=?,director_model=?,state='queued',updated=?,message='分镜已完成，等待 GPU' WHERE id=? AND state='planning'",(pack(result['shots']),qual,result['route'],result['model'],now(),r['id']))
+   with db() as c:c.execute("UPDATE jobs SET shots=?,quality=?,audio_mode=COALESCE(audio_mode,'auto'),route=?,director_model=?,state='queued',updated=?,message='创作描述已完成，等待 GPU' WHERE id=? AND state='planning'",(pack(result['shots']),qual,result['route'],result['model'],now(),r['id']))
    print('director model=%s first_s=%s total_s=%.3f shots=%d'%(result['model'],first,time.monotonic()-start,len(result['shots'])),flush=True)
   except Exception as e:
    msg=str(e) if isinstance(e,Problem) else '分镜生成失败，请重新提交。'
@@ -181,7 +183,7 @@ class Handler(BaseHTTPRequestHandler):
   if relay and self.command in ('PUT','GET'):return shot_relay.serve(self,relay[1],DATA,db,fail)
   m=re.fullmatch(r'/api/worker/media/([A-Za-z0-9_-]{1,120})',p)
   if m and self.command=='PUT':return media.put(self,m[1],DATA,db,self.worker_auth,fail)
-  if self.command in ('GET','HEAD') and p in ('/colab-worker.py','/colab-worker.ipynb','/colab-worker-bf16.ipynb'):
+  if self.command in ('GET','HEAD') and p in ('/colab-image-worker.py','/colab-worker.py','/colab-worker.ipynb','/colab-worker-bf16.ipynb'):
    return self.send(200,(ROOT/p[1:]).read_bytes(),'application/octet-stream',{'Content-Disposition':'attachment; filename="'+p[1:]+'"'})
   if self.command in ('GET','HEAD') and p in ('/','/index.html','/app.js','/style.css','/studio-art.svg'):
    name='index.html' if p in ('/','/index.html') else p[1:]
@@ -216,6 +218,7 @@ class Handler(BaseHTTPRequestHandler):
   if p.startswith('/api/worker/'):
    if self.command!='POST':fail(405,'不支持此操作')
    wid,gpu=self.worker_auth(d);mode=precision(d)
+   if mode=='image-bf16' and (not re.search(r'\b[AH]100\b',gpu) or type(d.get('memory_mib')) is not int or d['memory_mib']<78000):fail(422,'生图仅接受 A100 80GB 或 H100 80GB')
    slot=d.get('runtime_id','')
    if slot and not re.fullmatch('[a-f0-9]{24}',str(slot)):fail(400,'无效显卡实例')
    if slot:wid=wid+'/'+slot
@@ -252,8 +255,8 @@ class Handler(BaseHTTPRequestHandler):
       if r:
        c.execute("UPDATE jobs SET state='running',message='GPU 已领取任务',progress=0,wid=?,gpu=?,lease=?,deadline=?,updated=?,tries=tries+1 WHERE id=?",(wid,gpu,secrets.token_urlsafe(24),t+600,t,r['id']))
        r=c.execute("SELECT * FROM jobs WHERE id=?",(r['id'],)).fetchone()
-       if slot and d.get('shot_v1') is True:shot_tasks.offer(c,r)
-      else:assist=shot_tasks.claim(c,wid,d,t,jobrow)
+       if mode!='image-bf16' and slot and d.get('shot_v1') is True:shot_tasks.offer(c,r)
+      elif mode!='image-bf16':assist=shot_tasks.claim(c,wid,d,t,jobrow)
      out={'job':jobrow(r,True) if r else None,'assist':assist}
      if r and c.execute('SELECT 1 FROM shot_tasks WHERE job_id=? AND epoch=? LIMIT 1',(r['id'],r['lease'])).fetchone():out['job']['parallel_cuts']=True
     elif p=='/api/worker/update':
@@ -351,23 +354,28 @@ class Handler(BaseHTTPRequestHandler):
     out={'ok':True,'device_id':r['device'],'gpu':r['gpu']}
    elif p=='/api/draft' and self.command=='POST':
     if not isinstance(d.get('shots',[]),list):fail(400,'分镜有误')
-    draft={'precision':precision(d),'audio_mode':d.get('audio_mode') if d.get('audio_mode') in ('auto','original','continuous') else 'auto','quality':d.get('quality') if d.get('quality') in ('fast','hd','standard') else 'hd','parent':s(d.get('parent'),100),'route':d.get('route') if d.get('route') in ('continuous','story','dialogue','mood') else 'story','prompt':s(d.get('prompt'),4000),'seconds':d.get('seconds') if type(d.get('seconds')) is int and 5<=d['seconds']<=120 else 10,'shots':[{'prompt':s(i.get('prompt'),2000),'seconds':i.get('seconds') if i.get('seconds') in (5,10,15) else 10} for i in d.get('shots',[])[:12] if isinstance(i,dict)]}
+    draft={'kind':'image' if d.get('kind')=='image' else 'video','aspect':d.get('aspect') if d.get('aspect') in image_director.SIZES else 'square','precision':precision(d),'audio_mode':d.get('audio_mode') if d.get('audio_mode') in ('auto','original','continuous') else 'auto','quality':d.get('quality') if d.get('quality') in ('fast','hd','standard') else 'hd','parent':s(d.get('parent'),100),'route':d.get('route') if d.get('route') in ('continuous','story','dialogue','mood') else 'story','prompt':s(d.get('prompt'),4000),'seconds':d.get('seconds') if type(d.get('seconds')) is int and 5<=d['seconds']<=120 else 10,'shots':[{'prompt':s(i.get('prompt'),2000),'seconds':i.get('seconds') if i.get('seconds') in (5,10,15) else 10} for i in d.get('shots',[])[:12] if isinstance(i,dict)]}
     c.execute('INSERT INTO drafts VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,updated=excluded.updated',(pack(draft),now()));out={'ok':True}
    elif mc and self.command=='GET':
     r=c.execute('SELECT * FROM jobs WHERE id=?',(mc[1],)).fetchone()
     if not r or (not watch_creation and visitor and r['visitor']!=visitor):fail(404,'没有此任务')
     out={'job':jobrow(r,c=c)}
    elif p=='/api/create' and self.command=='POST':
-    mode=precision(d);brief=s(d.get('prompt'),4000);sec=d.get('seconds');req=s(d.get('request_id'),100);parent=s(d.get('parent'),100) or None
-    raw_am=d.get('audio_mode');raw_q=d.get('quality')
+    kind=d.get('kind','video');aspect=d.get('aspect','square')
+    if kind not in ('video','image') or aspect not in image_director.SIZES:fail(400,'无效的创作类型或画幅')
+    mode='image-bf16' if kind=='image' else precision(d)
+    if kind=='video' and mode=='image-bf16':fail(400,'请选择图片创作')
+    brief=s(d.get('prompt'),4000);sec=0 if kind=='image' else d.get('seconds');req=s(d.get('request_id'),100);parent=s(d.get('parent'),100) or None
+    if kind=='image' and parent:fail(400,'图片不支持视频续拍')
+    raw_am='original' if kind=='image' else d.get('audio_mode');raw_q='standard' if kind=='image' else d.get('quality')
     if raw_am is not None and raw_am not in ('auto','original','continuous'):fail(400,'无效的声音设置')
     if raw_q is not None and raw_q not in ('auto','standard','fast','hd'):fail(400,'无效生成模式')
     explicit_q=None if raw_q in (None,'auto') else raw_q
     if mode=='bf16' and explicit_q not in (None,'hd'):fail(400,'BF16 使用原始 768p 配置')
-    if not brief or type(sec) is not int or not 15<=sec<=120 or not re.fullmatch(r'[a-zA-Z0-9-]{16,100}',req):fail(400,'请输入创意，并选择 15 至 120 秒。')
+    if not brief or type(sec) is not int or not (sec==0 if kind=='image' else 15<=sec<=120) or not re.fullmatch(r'[a-zA-Z0-9-]{16,100}',req):fail(400,'请输入创意，并选择 15 至 120 秒。')
     r=c.execute('SELECT * FROM jobs WHERE request=?',(req,)).fetchone()
     if r and visitor and r['visitor']!=visitor:fail(409,'请求编号不可用。')
-    if r and ((r['precision'] or 'quantized')!=mode or r['brief']!=brief or r['seconds']!=sec or r['parent']!=parent or (raw_am is not None and (r['audio_mode'] or 'auto')!=raw_am) or (explicit_q is not None and r['state']=='planning' and r['quality']!=explicit_q)):fail(409,'同一请求编号的内容不同')
+    if r and ((r['precision'] or 'quantized')!=mode or r['brief']!=brief or r['seconds']!=sec or r['parent']!=parent or (kind=='image' and r['aspect']!=aspect) or (raw_am is not None and (r['audio_mode'] or 'auto')!=raw_am) or (explicit_q is not None and r['state']=='planning' and r['quality']!=explicit_q)):fail(409,'同一请求编号的内容不同')
     if not r:
      if c.execute("SELECT COUNT(*) FROM jobs WHERE state IN ('planning','queued','running')").fetchone()[0]>=MAX_PENDING:fail(429,'队列已满，请稍后再试')
      if visitor:
@@ -380,16 +388,18 @@ class Handler(BaseHTTPRequestHandler):
      if parent:
       prior=c.execute('SELECT * FROM jobs WHERE id=? AND (? IS NULL OR visitor=?)',(parent,visitor,visitor)).fetchone()
       if not prior:fail(404,'上一版记录不存在')
+      if prior['precision']=='image-bf16':fail(400,'图片不能作为续拍原片')
       if prior['state']!='done' or not media.ready(DATA,prior):fail(409,'原片尚未就绪，请在成片同步后续拍。')
       total=(prior['total_seconds'] or prior['seconds'])+sec
       prompt='仅编排原片之后新增的 '+str(sec)+' 秒。第一镜从原片最后一帧继续，保持角色、机位和画幅。原片背景：'+prior['prompt'][-3000:]+'。接下来发生：'+brief
      jid=uuid.uuid4().hex
      c.execute("INSERT INTO jobs(precision,visitor,id,request,parent,brief,prompt,seconds,state,progress,shots,message,created,updated) VALUES(?,?,?,?,?,?,?,?,'planning',0,'[]','已收到创意，等待编排',?,?)",(mode,visitor,jid,req,parent,brief,prompt,sec,now(),now()))
-     c.execute('UPDATE jobs SET total_seconds=?,audio_mode=?,quality=? WHERE id=?',(total,raw_am,explicit_q,jid))
+     c.execute('UPDATE jobs SET total_seconds=?,audio_mode=?,quality=?,aspect=? WHERE id=?',(total,raw_am,explicit_q,aspect,jid))
      r=c.execute('SELECT * FROM jobs WHERE id=?',(jid,)).fetchone()
     out={'job':jobrow(r,c=c)};plan_wake.set()
    elif p=='/api/jobs' and self.command=='POST':
     mode=precision(d)
+    if mode=='image-bf16':fail(400,'图片请通过创作入口提交')
     quality=d.get('quality','hd' if mode=='bf16' else 'standard')
     if mode=='bf16' and quality!='hd':fail(400,'BF16 使用原始 768p 配置')
     audio_mode=d.get('audio_mode','original')
