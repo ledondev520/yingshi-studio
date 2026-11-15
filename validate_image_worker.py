@@ -21,7 +21,7 @@ def run(manual=False):
   root=Path(tmp);identity=root/'identity.json';identity.write_text(json.dumps({'worker_id':'test','worker_key':'test-only'}))
   signal=root/'upload.json';signal.write_text(json.dumps({'url':'https://www.googleapis.com/upload/test'}))
   counts={'loads':0,'renders':0,'drive':0,'preview':0};updates=[]
-  jobs=[{'id':str(n)*32,'lease_token':'lease','shots':[{'h3_prompt':'test','width':2048,'height':2048}]} for n in (1,2)]
+  jobs=[{'id':str(n)*32,'lease_token':'lease','shots':[{'h3_prompt':'test','width':2048 if n==1 else 1536,'height':1536 if n==1 else 2048}]} for n in (1,2)]
   def prepare():
    counts['loads']+=1
    def pipe(**kw):counts['renders']+=1;return [Image(kw['width'],kw['height'])]

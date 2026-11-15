@@ -100,7 +100,7 @@ python3 validate_relay.py /path/to/small-test.mp4
 `/api/preview/<id>` 与原片接口共享鉴权、Range 和 HEAD；仅私有缓存且每次复验权限。准备中或失败会显示状态，并始终提供高清原片下载。`validate_previews.py` 验证真实转码、新上传与旧片补齐、失败重试、原片完整性和权限隔离。
 
 ## 图片创作
-创作台可切换视频和图片。图片通过 Gemini 4 Hydrogen（LOW） 扩写中文画面设计及英文 H3-Image 提示词，保留原语言可见文字；原有视频导演仍使用 Argon。图片只使用 MiniMax-H3-Image 原始 BF16，不加载量化版本。三种画幅为 2048×2048、2560×1536、1536×2560，官方六步采样。
+创作台可切换视频和图片。图片通过 Gemini 4 Hydrogen（LOW） 扩写中文画面设计及英文 H3-Image 提示词，保留原语言可见文字；原有视频导演仍使用 Argon。图片只使用 MiniMax-H3-Image 原始 BF16，不加载量化版本。默认横图 4:3（2048×1536），另有竖图 3:4（1536×2048）及方幅 1:1（2048×2048）；旧任务的 5:3/3:5 尺寸继续兼容，官方六步采样。
 图片以 `image-bf16` 独立执行模式进入现有队列，视频工作端不会领取图片。自动调度只申请 A100/H100，并由执行端验证 80GB 显存及 130GiB 可用主机 RAM；不回退 G4 或小显存卡。`colab-image-worker.py` 由既有私有调度身份启动；也可在已挂载 Drive、已有 studio-device.json 配对的空闲运行时启动，直接复用原版缓存与 Drive 输出。首次安装与约 135GB 权重准备耗时较长；同一进程连续接单时复用管线及本机缓存，运行时被回收后需重新准备。
 生成 PNG 保存至 Drive，并通过现有认证上传保留 VPS 私有副本。图片预览、下载和追踪链接沿用任务所有者/访客隔离。验证：`python3 validate_images.py`；视频回归沿用 validate_multiuser、validate_pool 与 validate_worker_loop。部署同时更新服务端、前端、图片执行脚本及 autowake/controller.py，并重启两个服务；数据库仅新增可空的 aspect 列，历史任务保留。
 

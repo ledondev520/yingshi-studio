@@ -78,7 +78,7 @@ def online_modes(c):
 def jobrow(r,internal=False,c=None):
  x={k:r[k] for k in ('id','prompt','seconds','state','progress','message','created','updated','gpu')}
  x['precision']=r['precision'] or 'quantized'
- x['kind']='image' if x['precision']=='image-bf16' else 'video';x['aspect']=r['aspect'] or 'square'
+ x['kind']='image' if x['precision']=='image-bf16' else 'video';x['aspect']=r['aspect'] or 'landscape'
  x['audio_mode']=r['audio_mode'] or 'original';x['quality']=r['quality'] or 'standard';x['shots']=json.loads(r['shots']);x['result_url']=r['result'] or '';x['parent']=r['parent'] or '';x['brief']=r['brief'] or r['prompt']
  x['media_ready']=media.ready(DATA,r) if r['state']=='done' else False
  x['preview_status']=media.preview_status(DATA,r) if x['media_ready'] else None
@@ -117,7 +117,7 @@ def run_planner(images=False):
    if t-last<.30:return
    last=t
    shots=[{'prompt':parts[0],'h3_prompt':parts[1] if len(parts)>1 else '','seconds':0}] if images else [{'prompt':x,'seconds':0} for x in parts]
-   message=('正在扩写生图提示词' if len(parts)>1 else '正在写画面描述') if images else '正在写第 '+str(len(parts))+' 段分镜'
+   message='正在创作' if images else '正在写第 '+str(len(parts))+' 段分镜'
    with db() as c:c.execute("UPDATE jobs SET shots=?,updated=?,message=? WHERE id=? AND state='planning'",(pack(shots),now(),message,r['id']))
   try:
    result=image_director.plan(dict(r),KEYS,fail,progress) if images else director.plan(dict(r),KEYS,fail,progress)
@@ -241,9 +241,11 @@ class Handler(BaseHTTPRequestHandler):
     return
    with db() as c:
     cleanup(c);t=now();c.execute("INSERT INTO workers VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET gpu=excluded.gpu,seen=excluded.seen",(wid,gpu,t))
-    c.execute('INSERT INTO worker_modes VALUES(?,?) ON CONFLICT(id) DO UPDATE SET precision=excluded.precision',(wid,mode))
+    # Older image workers reject 4:3; let active leases finish but give new jobs to upgraded workers.
+    legacy_image=mode=='image-bf16' and d.get('image_43') is not True
+    c.execute('INSERT INTO worker_modes VALUES(?,?) ON CONFLICT(id) DO UPDATE SET precision=excluded.precision',(wid,'image-bf16-legacy' if legacy_image else mode))
     fleet.register(c,wid,d)
-    if p=='/api/worker/claim' and c.execute('select 1 from worker_drain where device=?',(wid.split('/')[0],)).fetchone():out={'job':None,'assist':None}
+    if p=='/api/worker/claim' and (legacy_image or c.execute('select 1 from worker_drain where device=?',(wid.split('/')[0],)).fetchone()):out={'job':None,'assist':None}
     elif p=='/api/worker/heartbeat':out={'ok':True}
     elif p=='/api/worker/media-pending':out={'jobs':media.pending(c,DATA)}
     elif p.startswith('/api/worker/shot/'):
@@ -359,14 +361,14 @@ class Handler(BaseHTTPRequestHandler):
     out={'ok':True,'device_id':r['device'],'gpu':r['gpu']}
    elif p=='/api/draft' and self.command=='POST':
     if not isinstance(d.get('shots',[]),list):fail(400,'分镜有误')
-    draft={'kind':'image' if d.get('kind')=='image' else 'video','aspect':d.get('aspect') if d.get('aspect') in image_director.SIZES else 'square','precision':precision(d),'audio_mode':d.get('audio_mode') if d.get('audio_mode') in ('auto','original','continuous') else 'auto','quality':d.get('quality') if d.get('quality') in ('fast','hd','standard') else 'hd','parent':s(d.get('parent'),100),'route':d.get('route') if d.get('route') in ('continuous','story','dialogue','mood') else 'story','prompt':s(d.get('prompt'),4000),'seconds':d.get('seconds') if type(d.get('seconds')) is int and 5<=d['seconds']<=120 else 10,'shots':[{'prompt':s(i.get('prompt'),2000),'seconds':i.get('seconds') if i.get('seconds') in (5,10,15) else 10} for i in d.get('shots',[])[:12] if isinstance(i,dict)]}
+    draft={'kind':'image' if d.get('kind')=='image' else 'video','aspect':d.get('aspect') if d.get('aspect') in image_director.SIZES else 'landscape','precision':precision(d),'audio_mode':d.get('audio_mode') if d.get('audio_mode') in ('auto','original','continuous') else 'auto','quality':d.get('quality') if d.get('quality') in ('fast','hd','standard') else 'hd','parent':s(d.get('parent'),100),'route':d.get('route') if d.get('route') in ('continuous','story','dialogue','mood') else 'story','prompt':s(d.get('prompt'),4000),'seconds':d.get('seconds') if type(d.get('seconds')) is int and 5<=d['seconds']<=120 else 10,'shots':[{'prompt':s(i.get('prompt'),2000),'seconds':i.get('seconds') if i.get('seconds') in (5,10,15) else 10} for i in d.get('shots',[])[:12] if isinstance(i,dict)]}
     c.execute('INSERT INTO drafts VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,updated=excluded.updated',(pack(draft),now()));out={'ok':True}
    elif mc and self.command=='GET':
     r=c.execute('SELECT * FROM jobs WHERE id=?',(mc[1],)).fetchone()
     if not r or (not watch_creation and visitor and r['visitor']!=visitor):fail(404,'没有此任务')
     out={'job':jobrow(r,c=c)}
    elif p=='/api/create' and self.command=='POST':
-    kind=d.get('kind','video');aspect=d.get('aspect','square')
+    kind=d.get('kind','video');aspect=d.get('aspect','landscape')
     if kind not in ('video','image') or aspect not in image_director.SIZES:fail(400,'无效的创作类型或画幅')
     mode='image-bf16' if kind=='image' else precision(d)
     if kind=='video' and mode=='image-bf16':fail(400,'请选择图片创作')

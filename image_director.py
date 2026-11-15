@@ -3,7 +3,7 @@ import json, time, urllib.error
 import director
 
 MODEL='gemini-4-hydrogen'
-SIZES={'square':(2048,2048),'landscape':(2560,1536),'portrait':(1536,2560)}
+SIZES={'square':(2048,2048),'landscape':(2048,1536),'portrait':(1536,2048)}
 
 def validate(value,aspect):
     if not isinstance(value,dict):raise ValueError('invalid image plan')

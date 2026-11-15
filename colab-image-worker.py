@@ -68,7 +68,7 @@ def run():
     if not managed:identity=Path('/content/drive/MyDrive/MiniMax-H3/studio-device.json')
     if not identity.is_file():raise RuntimeError('缺少既有工作端配对信息，请由工作台调度器启动，或先挂载已配对的 Drive。')
     cfg=json.loads(identity.read_text());headers={'Authorization':'Bearer '+cfg['worker_key']}
-    worker={'worker_id':cfg['worker_id'],'runtime_id':secrets.token_hex(12),'gpu':gpu,'memory_mib':memory,'precision':'image-bf16'}
+    worker={'worker_id':cfg['worker_id'],'runtime_id':secrets.token_hex(12),'gpu':gpu,'memory_mib':memory,'precision':'image-bf16','image_43':True}
     out=Path('/content/h3-image-results') if managed else Path('/content/drive/MyDrive/MiniMax-H3-Image-BF16/outputs/studio');out.mkdir(parents=True,exist_ok=True)
     def call(path,body):
         r=requests.post(BASE+'/api/worker/'+path,json={**worker,**body},headers=headers,timeout=(10,60));r.raise_for_status();return r.json()
@@ -96,10 +96,10 @@ def run():
         except requests.RequestException:time.sleep(10);continue
         if not job:time.sleep(5);continue
         ident=job['id'];lease={'id':ident,'lease_token':job['lease_token']}
-        with guard:active.update(**lease,state='running',progress=5,message='正在生成图片 · H3-Image 原版 BF16')
+        with guard:active.update(**lease,state='running',progress=5,message='正在生成图片')
         try:
             shot=job['shots'][0];width,height=shot['width'],shot['height']
-            if (width,height) not in ((2048,2048),(2560,1536),(1536,2560)):raise ValueError('invalid canvas')
+            if (width,height) not in ((2048,2048),(2048,1536),(1536,2048),(2560,1536),(1536,2560)):raise ValueError('invalid canvas')
             final=out/(ident+'.png');metadata=out/(ident+'.json')
             if not final.is_file():
                 started=time.monotonic()
