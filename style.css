@@ -705,7 +705,142 @@ summary:focus-visible {
   color: #b7c3b2;
 }
 
-/* Jobs toolbar & list */
+/* Media category switcher & Jobs library */
+.workSwitch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.workTab {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 13px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  text-align: left;
+  min-width: 0;
+  transition: border-color .16s ease, background-color .16s ease;
+}
+
+.workTab:hover {
+  border-color: var(--line-strong);
+  background: #1a211b;
+}
+
+.workTab[aria-selected="true"] {
+  border-color: var(--accent);
+  background: #1d261a;
+  box-shadow: inset 0 1px 0 rgba(223, 244, 156, .08);
+}
+
+.workTabTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
+.workTabTitle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.workIcon {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font: 11px/1 var(--mono);
+  font-style: normal;
+  background: #232c22;
+  color: #b7c8a9;
+  border: 1px solid #354334;
+  flex-shrink: 0;
+}
+
+.workTab[aria-selected="true"] .workIcon {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: transparent;
+  font-weight: 700;
+}
+
+.workTabTitle strong {
+  font-size: 15.5px;
+  font-weight: 650;
+  letter-spacing: -.01em;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.workTab[aria-selected="true"] .workTabTitle strong {
+  color: #f4fae6;
+}
+
+.workCount {
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: #111611;
+  border: 1px solid #2b352a;
+  color: var(--dim);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.workTab[aria-selected="true"] .workCount {
+  background: #273422;
+  border-color: #465d39;
+  color: var(--accent);
+}
+
+.workTabSub {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
+.workHint {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.workTab[aria-selected="true"] .workHint {
+  color: #aebfa5;
+}
+
+.workActiveBadge {
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  background: #25331d;
+  border: 1px solid #445c34;
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 .jobbar {
   display: flex;
   align-items: center;
@@ -716,6 +851,63 @@ summary:focus-visible {
   border-radius: 12px 12px 0 0;
   padding: 10px 14px;
   background: #181e18;
+}
+
+.jobbarLeft,
+.jobbarRight {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.jobbarRight {
+  margin-left: auto;
+}
+
+.topPager {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: #111511;
+  border: 1px solid #2a3329;
+  border-radius: 8px;
+  padding: 2px;
+  font-size: 12px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.topPager span {
+  padding: 0 6px;
+}
+
+.topPageBtn {
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #cbd7c6;
+  font-size: 13px;
+  line-height: 1;
+  transition: background-color .15s ease, color .15s ease;
+}
+
+.topPageBtn:hover:not(:disabled) {
+  background: #273226;
+  color: var(--accent);
+}
+
+.libraryLabel {
+  font-size: 13px;
+  font-weight: 650;
+  color: #d9e6cb;
+  letter-spacing: -.01em;
+  white-space: nowrap;
 }
 
 .tabs {
@@ -755,7 +947,7 @@ summary:focus-visible {
   text-align: center;
   line-height: 1.7;
   color: var(--dim);
-  padding: 30px 18px;
+  padding: 32px 18px;
   font-size: 13px;
   border-radius: 0 0 12px 12px;
 }
@@ -768,8 +960,75 @@ summary:focus-visible {
   min-width: 0;
 }
 
-.job:last-child {
+.workLibrary[data-paged="0"] .job:last-child {
   border-radius: 0 0 12px 12px;
+}
+
+.jobPager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-top: 0;
+  border-radius: 0 0 12px 12px;
+  padding: 11px 16px;
+  background: #181e18;
+}
+
+.pagerInfo {
+  font-size: 12px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.pagerControls {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.pageBtn {
+  min-width: 32px;
+  height: 30px;
+  padding: 0 9px;
+  border-radius: 7px;
+  border: 1px solid #303b2f;
+  background: #131813;
+  color: #cbd7c6;
+  font-size: 12px;
+  font-weight: 550;
+  font-variant-numeric: tabular-nums;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  transition: background-color .15s ease, border-color .15s ease, color .15s ease;
+}
+
+.pageBtn:hover:not(:disabled):not(.isCurrent) {
+  background: #222b21;
+  border-color: #485846;
+  color: var(--ink);
+}
+
+.pageBtn.isCurrent {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: transparent;
+  font-weight: 700;
+  cursor: default;
+}
+
+.pageDots {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 0 3px;
+  user-select: none;
 }
 
 .jobHead {
@@ -1007,6 +1266,7 @@ summary:focus-visible {
 .actBtn:hover {
   background: #273127;
   border-color: #4c5d4a;
+  text-decoration: none;
 }
 
 .actPrimary {
@@ -1208,6 +1468,45 @@ footer {
     width: 100%;
   }
 
+  .workSwitch {
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+
+  .workTab {
+    padding: 11px 12px;
+    border-radius: 10px;
+    gap: 4px;
+  }
+
+  .workIcon {
+    width: 22px;
+    height: 22px;
+    font-size: 10px;
+  }
+
+  .workTabTitle {
+    gap: 6px;
+  }
+
+  .workTabTitle strong {
+    font-size: 14px;
+  }
+
+  .workCount {
+    font-size: 11.5px;
+    padding: 1px 7px;
+  }
+
+  .workHint {
+    font-size: 11.5px;
+  }
+
+  .libraryLabel,
+  .topPager {
+    display: none;
+  }
+
   .jobbar {
     padding: 9px 12px;
   }
@@ -1225,6 +1524,22 @@ footer {
     font-size: 14px;
   }
 
+  .jobPager {
+    padding: 10px 12px;
+    gap: 8px;
+  }
+
+  .pagerInfo {
+    font-size: 11.5px;
+  }
+
+  .pageBtn {
+    min-width: 29px;
+    height: 28px;
+    padding: 0 7px;
+    font-size: 11.5px;
+  }
+
   dialog {
     width: 95vw;
     padding: 14px;
@@ -1239,9 +1554,35 @@ footer {
   }
 }
 
+@media (max-width: 480px) {
+  .workTabSub .workHint {
+    display: none;
+  }
+
+  .workTabSub:not(:has(.workActiveBadge:not([hidden]))) {
+    display: none;
+  }
+
+  .pageBtn.pageNum:not(.isCurrent) {
+    display: none;
+  }
+
+  .pageDots {
+    display: none;
+  }
+}
+
 @media (max-width: 370px) {
   .top, main {
     padding: 0 12px;
+  }
+
+  .workTab {
+    padding: 9px 10px;
+  }
+
+  .workTabTitle strong {
+    font-size: 13px;
   }
 
   .tabs button {

@@ -354,8 +354,13 @@ class Handler(BaseHTTPRequestHandler):
    cleanup(c)
    if p=='/api/state' and self.command=='GET':
     dr=c.execute('SELECT data FROM drafts WHERE id=1').fetchone();wr=c.execute('SELECT gpu,seen FROM workers ORDER BY seen DESC LIMIT 1').fetchone()
-    rows=c.execute('SELECT * FROM jobs WHERE ? IS NULL OR visitor=? ORDER BY created DESC,rowid DESC LIMIT 80',(visitor,visitor))
-    out={'role':'guest' if visitor else 'owner','jobs':[jobrow(r,c=c) for r in rows],'draft':json.loads(dr['data']) if dr and not visitor else None,'worker':worker_status(wr,c),'online_modes':online_modes(c),'now':now()}
+    totals={'video':0,'image':0}
+    for is_img,cnt in c.execute("SELECT COALESCE(precision,'quantized')='image-bf16',COUNT(*) FROM jobs WHERE ? IS NULL OR visitor=? GROUP BY 1",(visitor,visitor)):
+     totals['image' if is_img else 'video']=cnt
+    vrows=c.execute("SELECT rowid,* FROM jobs WHERE (? IS NULL OR visitor=?) AND COALESCE(precision,'quantized')!='image-bf16' ORDER BY created DESC,rowid DESC LIMIT 200",(visitor,visitor)).fetchall()
+    irows=c.execute("SELECT rowid,* FROM jobs WHERE (? IS NULL OR visitor=?) AND precision='image-bf16' ORDER BY created DESC,rowid DESC LIMIT 200",(visitor,visitor)).fetchall()
+    rows=sorted([*vrows,*irows],key=lambda r:(r['created'] or 0,r['rowid']),reverse=True)
+    out={'role':'guest' if visitor else 'owner','jobs':[jobrow(r,c=c) for r in rows],'job_totals':totals,'draft':json.loads(dr['data']) if dr and not visitor else None,'worker':worker_status(wr,c),'online_modes':online_modes(c),'now':now()}
    elif p=='/api/devices/link' and self.command=='POST':
     token=secrets.token_urlsafe(36);exp=now()+600
     c.execute('DELETE FROM activations WHERE expiry<=?',(now(),));c.execute('INSERT INTO activations VALUES(?,?)',(digest(token),exp))

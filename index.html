@@ -7,8 +7,8 @@
   <meta name="description" content="映室创作工作台：输入创意，生成短片或高清图片。">
   <title>映室 · 影像创作工作台</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23dff49c'/%3E%3Ccircle cx='16' cy='16' r='8' fill='none' stroke='%231f2d11' stroke-width='2.4'/%3E%3Ccircle cx='16' cy='16' r='3.4' fill='%231f2d11'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="style.css?v=mobile5">
-  <script src="app.js?v=mobile5" defer></script>
+  <link rel="stylesheet" href="style.css?v=library1">
+  <script src="app.js?v=library1" defer></script>
 </head>
 <body>
   <header class="top">
@@ -129,19 +129,61 @@
           <span class="num">02</span>
           <h2 id="historyTitle">任务与作品</h2>
         </div>
-        <span id="jobCount" class="micro">0 个任务</span>
+        <span id="jobCount" class="micro">视频 0 · 图片 0</span>
       </div>
 
-      <div class="jobbar">
-        <div id="tabs" class="tabs" role="group" aria-label="筛选任务">
-          <button type="button" data-filter="all" aria-pressed="true">全部</button>
-          <button type="button" data-filter="active" aria-pressed="false">进行中</button>
-          <button type="button" data-filter="done" aria-pressed="false">已完成</button>
+      <div id="workSwitch" class="workSwitch" role="tablist" aria-label="作品类型区分">
+        <button id="kindVideoTab" type="button" class="workTab" role="tab" data-work-kind="video" aria-selected="true" aria-controls="workLibrary">
+          <span class="workTabTop">
+            <span class="workTabTitle">
+              <i class="workIcon" aria-hidden="true">▶</i>
+              <strong>视频成片</strong>
+            </span>
+            <span id="videoKindCount" class="workCount">0 个</span>
+          </span>
+          <span class="workTabSub">
+            <span id="videoKindHint" class="workHint">短片生成 · 分镜与续拍</span>
+            <span id="videoActiveBadge" class="workActiveBadge" hidden></span>
+          </span>
+        </button>
+        <button id="kindImageTab" type="button" class="workTab" role="tab" data-work-kind="image" aria-selected="false" aria-controls="workLibrary">
+          <span class="workTabTop">
+            <span class="workTabTitle">
+              <i class="workIcon" aria-hidden="true">▣</i>
+              <strong>图片作品</strong>
+            </span>
+            <span id="imageKindCount" class="workCount">0 张</span>
+          </span>
+          <span class="workTabSub">
+            <span id="imageKindHint" class="workHint">高清生图 · 横竖方幅</span>
+            <span id="imageActiveBadge" class="workActiveBadge" hidden></span>
+          </span>
+        </button>
+      </div>
+
+      <section id="workLibrary" class="workLibrary" data-kind="video" data-paged="0" role="tabpanel" aria-labelledby="kindVideoTab">
+        <div class="jobbar">
+          <div class="jobbarLeft">
+            <strong id="libraryLabel" class="libraryLabel">视频列表</strong>
+            <div id="tabs" class="tabs" role="group" aria-label="筛选当前类型任务">
+              <button type="button" data-filter="all" aria-pressed="true">全部</button>
+              <button type="button" data-filter="active" aria-pressed="false">进行中</button>
+              <button type="button" data-filter="done" aria-pressed="false">已完成</button>
+            </div>
+          </div>
+          <div class="jobbarRight">
+            <div id="topPager" class="topPager" hidden></div>
+            <span class="tag" id="workerSeen">准备中</span>
+          </div>
         </div>
-        <span class="tag" id="workerSeen">准备中</span>
-      </div>
 
-      <div id="jobs" aria-live="off"></div>
+        <div id="jobs" aria-live="off"></div>
+
+        <nav id="jobPager" class="jobPager" aria-label="作品列表分页" hidden>
+          <span id="pagerInfo" class="pagerInfo"></span>
+          <div id="pagerControls" class="pagerControls"></div>
+        </nav>
+      </section>
     </div>
 
     <dialog id="preview">
