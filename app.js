@@ -139,29 +139,73 @@ async function boot(){const hash=new URLSearchParams(location.hash.slice(1));con
 window.addEventListener('hashchange',()=>{if(location.hash.startsWith('#activate=')||location.hash.startsWith('#job='))boot()});boot();setInterval(()=>{if(!document.hidden)refresh(!logged)},5000);
 
 
-let previewJob='',stopPlaybackCheck=()=>{};
-function mediaUrl(j,preview=false){const tok=j.watch_token||jobToken(j.id);return 'api/'+(preview?'preview/':'media/')+encodeURIComponent(j.id)+(tok?'?token='+encodeURIComponent(tok):'')}
+let previewJob='',previewWatch=0,stopPlaybackCheck=()=>{};
+function clearPreview(){
+ stopPlaybackCheck();stopPlaybackCheck=()=>{};clearInterval(previewWatch);previewWatch=0;
+ const frame=$('frame');
+ for(const v of frame.querySelectorAll('video')){v.onwaiting=null;v.onplaying=null;v.onerror=null;v.onloadedmetadata=null;v.pause();v.removeAttribute('src');v.load()}
+ frame.replaceChildren();
+}
+function mediaUrl(j,preview=false,bust=0){
+ const tok=j.watch_token||jobToken(j.id),q=[];
+ if(tok)q.push('token='+encodeURIComponent(tok));
+ if(bust)q.push('r='+bust);
+ return 'api/'+(preview?'preview/':'media/')+encodeURIComponent(j.id)+(q.length?'?'+q.join('&'):'');
+}
+function bufferedEnd(v,at){
+ let end=0;
+ for(let i=0;i<v.buffered.length;i++){
+  const a=v.buffered.start(i),b=v.buffered.end(i);
+  if(a<=at+0.5&&b>end)end=b;
+ }
+ return end;
+}
 function renderPreview(j){
  const image=j.kind==='image',frame=$('frame'),state=image?'ready':j.preview_status||'pending',key=j.id+':'+state;if(frame.dataset.preview===key)return;frame.dataset.preview=key;
- stopPlaybackCheck();$('retryPreview').hidden=true;const url=mediaUrl(j);$('downloadFilm').href=url+(url.includes('?')?'&':'?')+'download=1';$('downloadFilm').download='映室-'+j.id.slice(0,8)+(image?'.png':'.mp4');
+ clearPreview();$('retryPreview').hidden=true;const url=mediaUrl(j);$('downloadFilm').href=url+(url.includes('?')?'&':'?')+'download=1';$('downloadFilm').download='映室-'+j.id.slice(0,8)+(image?'.png':'.mp4');
  $('previewHeading').textContent=image?'图片预览':'成片预览';$('downloadFilm').textContent=image?'下载图片':'下载高清原片';
  if(image){const img=document.createElement('img');img.src=url;img.alt=j.brief||'生成图片';img.onerror=()=>{$('previewStatus').textContent='图片加载失败，请关闭后重试或下载原图。'};frame.replaceChildren(img);$('previewStatus').textContent='';return}
- $('previewStatus').textContent=state==='ready'?'轻量预览 · 下载可获取高清原片。':state==='failed'?'预览暂不可用，后台会重试；高清原片可直接下载。':'预览版准备中，完成后即可播放；高清原片已保存，可直接下载。';
- frame.replaceChildren();if(state!=='ready')return;
- const v=document.createElement('video');v.src=mediaUrl(j,true);v.controls=true;v.playsInline=true;v.preload='metadata';v.setAttribute('aria-label',j.brief||'成片预览');
- v.onwaiting=()=>{$('previewStatus').textContent='正在缓冲视频…';$('retryPreview').hidden=false};
- v.onplaying=()=>{$('previewStatus').textContent='轻量预览 · 下载可获取高清原片。';$('retryPreview').hidden=true};
- v.onerror=()=>{$('previewStatus').textContent='预览加载失败，可重试或下载高清原片。';$('retryPreview').hidden=false};
+ const readyText='轻量预览 · 下载可获取高清原片。';
+ $('previewStatus').textContent=state==='ready'?readyText:state==='failed'?'预览暂不可用，后台会重试；高清原片可直接下载。':'预览版准备中，完成后即可播放；高清原片已保存，可直接下载。';
+ if(state!=='ready')return;
+ const v=document.createElement('video');v.src=mediaUrl(j,true);v.controls=true;v.playsInline=true;v.preload='auto';v.setAttribute('aria-label',j.brief||'成片预览');
+ let retries=0,recovering=false,lastTime=-1,lastBuf=-1,stalledTicks=0;
+ const recover=(manual=false)=>{
+  if((recovering&&!manual)||previewJob!==j.id)return;
+  if(!manual&&retries>=3){$('previewStatus').textContent='预览加载失败，可重试或下载高清原片。';$('retryPreview').hidden=false;clearInterval(previewWatch);previewWatch=0;return}
+  recovering=true;retries=manual?0:retries+1;stalledTicks=0;
+  const resumeAt=Number.isFinite(v.currentTime)&&v.currentTime>0.2?v.currentTime:0,wantPlay=manual||!v.paused&&!v.ended||Boolean(v.error);
+  $('previewStatus').textContent='网络波动，正在自动续播…';$('retryPreview').hidden=false;
+  v.pause();v.removeAttribute('src');v.load();
+  v.onloadedmetadata=()=>{
+   v.onloadedmetadata=null;
+   if(resumeAt>0&&(!Number.isFinite(v.duration)||resumeAt<v.duration-0.15)){try{v.currentTime=resumeAt}catch{}}
+   recovering=false;lastTime=v.currentTime;lastBuf=bufferedEnd(v,v.currentTime);
+   if(wantPlay)playPreview(v);
+  };
+  v.src=mediaUrl(j,true,Date.now()+'_'+retries);v.load();
+ };
+ v._recover=recover;
+ v.onwaiting=()=>{if(!recovering){$('previewStatus').textContent='正在缓冲视频…';$('retryPreview').hidden=false}};
+ v.onplaying=()=>{recovering=false;stalledTicks=0;delete v.dataset.playError;$('previewStatus').textContent=readyText;$('retryPreview').hidden=true};
+ v.onerror=()=>{recovering=false;recover(false)};
  frame.append(v);stopPlaybackCheck=checkPlayback(v,j);playPreview(v);
-
+ previewWatch=setInterval(()=>{
+  if(!v.isConnected||previewJob!==j.id){clearInterval(previewWatch);previewWatch=0;return}
+  if(document.hidden||recovering||v.paused||v.ended){stalledTicks=0;lastTime=v.currentTime;lastBuf=bufferedEnd(v,v.currentTime);return}
+  const t=v.currentTime,b=bufferedEnd(v,t);
+  if(Math.abs(t-lastTime)<0.02&&b<=lastBuf+0.02&&v.readyState<3){stalledTicks++;if(stalledTicks>=3)recover(false)}
+  else stalledTicks=0;
+  lastTime=t;lastBuf=b;
+ },1000);
 }
-function openPreview(j){if(!j.media_ready||!j.id)return;previewJob=j.id;$('preview').showModal();renderPreview(j)}
-$('closePreview').onclick=()=>$('preview').close();$('preview').onclose=()=>{stopPlaybackCheck();previewJob='';const v=$('frame').querySelector('video');if(v){v.pause();v.removeAttribute('src');v.load()}$('frame').replaceChildren();delete $('frame').dataset.preview};
+function openPreview(j){if(!j.media_ready||!j.id)return;previewJob=j.id;delete $('frame').dataset.preview;$('preview').showModal();renderPreview(j)}
+$('closePreview').onclick=()=>$('preview').close();$('preview').onclose=()=>{previewJob='';clearPreview();delete $('frame').dataset.preview};
 
 function playPreview(v){
  v.play().catch(e=>{if(!$('frame').contains(v))return;v.dataset.playError=e.name;$('previewStatus').textContent=e.name==='NotAllowedError'?'浏览器需要再次确认，请点「播放／重试」。':'视频尚未开始播放，请重试或下载高清原片。';$('retryPreview').hidden=false});
 }
-$('retryPreview').onclick=()=>{const v=$('frame').querySelector('video');if(v){if(v.error)v.load();playPreview(v)}};
+$('retryPreview').onclick=()=>{const v=$('frame').querySelector('video');if(!v)return;if(v.error||(!v.paused&&v.readyState<3))v._recover?.(true);else playPreview(v)};
 // Temporary playback-check instrumentation: only active through an explicit diagnostic link.
 function checkPlayback(v,j){
  const run=new URLSearchParams(location.search).get('playback_check');if(!/^[a-f0-9]{16}$/.test(run||''))return ()=>{};

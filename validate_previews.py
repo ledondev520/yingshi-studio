@@ -68,8 +68,14 @@ def run():
             assert head['ETag'] != request('media/11111111111111111111111111111111', headers=auth)[1]['ETag']
             assert 'private' in head['Cache-Control'] and 'no-cache' in head['Cache-Control']
             request('preview/11111111111111111111111111111111', status=304, headers={**auth, 'If-None-Match': head['ETag']})
+            request('preview/11111111111111111111111111111111', status=304, headers={**auth, 'If-None-Match': 'W/' + head['ETag']})
             part, headers = request('preview/11111111111111111111111111111111', status=206, headers={**auth, 'Range': 'bytes=10-99'})
             assert part == preview[10:100] and headers['Content-Range'] == f'bytes 10-99/{len(preview)}'
+            # Conditional subrange requests must still receive 206 bytes rather than an empty 304.
+            assert request('preview/11111111111111111111111111111111', status=206,
+                           headers={**auth, 'Range': 'bytes=10-99', 'If-None-Match': head['ETag']})[0] == preview[10:100]
+            assert request('preview/11111111111111111111111111111111', status=206,
+                           headers={**auth, 'Range': 'bytes=10-99', 'If-Range': 'W/' + head['ETag']})[0] == preview[10:100]
             assert request('preview/11111111111111111111111111111111', status=206, headers={**auth, 'Range': 'bytes=-20'})[0] == preview[-20:]
             request('preview/11111111111111111111111111111111', status=416, headers={**auth, 'Range': f'bytes={len(preview)}-'})
             assert request('preview/11111111111111111111111111111111', headers=auth, method='HEAD')[1]['Content-Length'] == str(len(preview))
