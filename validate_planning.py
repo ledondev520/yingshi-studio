@@ -76,4 +76,68 @@ def independent(slow_image):
   assert not any(t.is_alive() for t in threads)
  print('PASS '+('image' if slow_image else 'video')+' planning cannot block the other queue; partial text survives before completion')
 
-if __name__=='__main__':streaming();independent(False);independent(True)
+def safety_and_recovery():
+ import h3_guidance
+ # 1. Safety block (promptFeedback.blockReason / finishReason SAFETY / model refusal) fails fast with 422 without wasting retries.
+ for blocked_event in (
+  {'promptFeedback':{'blockReason':'PROHIBITED_CONTENT'}},
+  {'candidates':[{'finishReason':'SAFETY','content':{'parts':[]}}]},
+  {'candidates':[{'finishReason':'STOP','content':{'parts':[{'text':json.dumps(['抱歉，我无法为您生成涉及露骨脱衣舞内容的分镜。'],ensure_ascii=False)}]}}]},
+ ):
+  calls=[]
+  wire=b'data: '+json.dumps(blocked_event).encode()+b'\n\n'
+  with tempfile.TemporaryDirectory() as tmp:
+   keys=Path(tmp);(keys/'vertex-api-key').write_text('test-only')
+   def resp(req,**kw):calls.append(req);return io.BytesIO(wire)
+   try:
+    with patch('urllib.request.urlopen',side_effect=resp):
+     director.plan({'prompt':'测试敏感提示词','seconds':15},keys,server.fail,lambda *_:None)
+   except server.Problem as exc:
+    assert exc.code==422 and '安全策略限制' in str(exc), (exc.code, str(exc))
+   else:
+    raise AssertionError('Expected BlockedError -> 422')
+  assert len(calls)==1, f'Safety block should not waste retries, got {len(calls)} calls'
+
+ # Hydrogen safety block also fast-fails in 1 call with 422.
+ img_calls=[]
+ with tempfile.TemporaryDirectory() as tmp:
+  keys=Path(tmp);(keys/'vertex-api-key').write_text('test-only')
+  def img_resp(req,**kw):img_calls.append(req);return io.BytesIO(b'data: {"promptFeedback":{"blockReason":"SAFETY"}}\n\n')
+  try:
+   with patch('urllib.request.urlopen',side_effect=img_resp):
+    image_director.plan({'prompt':'测试敏感生图','aspect':'square'},keys,server.fail,lambda *_:None)
+  except server.Problem as exc:
+   assert exc.code==422 and '安全策略限制' in str(exc)
+  else:
+   raise AssertionError('Expected image BlockedError -> 422')
+ assert len(img_calls)==1
+
+ # 2. Tolerant h3_guidance.unpack handles [CUT] before seconds, 's'/'秒' suffix, omitted 4th BGM field, and copied section headers.
+ s1=h3_guidance.unpack('8s|女孩推门进入病房|||integrated_multimodal_description: [Shot 1] A young woman opens the door.|||overall_soundscape: Quiet room tone and footsteps.',0,'story',True)
+ assert s1['seconds']==8 and s1['prompt']=='女孩推门进入病房' and s1['h3_prompt'].endswith('non_diegetic_music: N/A')
+ s2=h3_guidance.unpack('[CUT] 7秒|老人微笑醒来|||[Shot 2] An elderly patient wakes up and smiles.|||Soft breathing.|||non_diegetic_music: Gentle piano.',1,'story',True)
+ assert s2['seconds']==7 and s2.get('cut') is True and s2['prompt']=='老人微笑醒来'
+
+ # 3. Transient SSE stream error + MAX_TOKENS truncation + minor duration drift self-repair cleanly.
+ valid_arr=['STORY','HD',
+  '8s|第一镜中文|||A calm wide shot of a sunlit courtyard.|||Birds chirping softly.',
+  '[CUT] 6秒|第二镜中文|||Close-up of tea pouring into a ceramic cup.|||Warm water pouring|||N/A']
+ attempt_Payloads=[
+  b'data: {"error":{"code":503,"status":"UNAVAILABLE"}}\n\n',
+  b'data: '+json.dumps({'candidates':[{'finishReason':'MAX_TOKENS','content':{'parts':[{'text':'["story","hd","15|半截'}]}}]}).encode()+b'\n\n',
+  b'data: '+json.dumps({'candidates':[{'finishReason':'STOP','content':{'parts':[{'text':json.dumps(valid_arr,ensure_ascii=False)}]}}]}).encode()+b'\n\n',
+ ]
+ seen_bodies=[]
+ with tempfile.TemporaryDirectory() as tmp:
+  keys=Path(tmp);(keys/'vertex-api-key').write_text('test-only')
+  def seq_resp(req,**kw):
+   seen_bodies.append(json.loads(req.data))
+   return io.BytesIO(attempt_Payloads[len(seen_bodies)-1])
+  with patch('urllib.request.urlopen',side_effect=seq_resp),patch('director.time.sleep'):
+   out=director.plan({'id':'job123','prompt':'清晨茶馆泡茶','seconds':15},keys,server.fail,lambda *_:None)
+ assert len(seen_bodies)==3
+ assert seen_bodies[2]['generationConfig']['maxOutputTokens']>seen_bodies[1]['generationConfig']['maxOutputTokens']
+ assert out['route']=='story' and out['quality']=='hd' and sum(x['seconds'] for x in out['shots'])==15
+ print('PASS Argon/Hydrogen safety fast-fail (422, 0 retries), stream retry, MAX_TOKENS expansion, tolerant unpack & duration reconciliation')
+
+if __name__=='__main__':streaming();independent(False);independent(True);safety_and_recovery()

@@ -130,8 +130,10 @@ def run_planner(images=False):
    with db() as c:c.execute("UPDATE jobs SET shots=?,quality=?,audio_mode=COALESCE(audio_mode,'auto'),route=?,director_model=?,state='queued',updated=?,message='创作描述已完成，等待 GPU' WHERE id=? AND state='planning'",(pack(result['shots']),qual,result['route'],result['model'],now(),r['id']))
    print('director model=%s first_s=%s total_s=%.3f shots=%d'%(result['model'],first,time.monotonic()-start,len(result['shots'])),flush=True)
   except Exception as e:
+   code=e.code if isinstance(e,Problem) else 500
    msg=str(e) if isinstance(e,Problem) else '分镜生成失败，请重新提交。'
-   with db() as c:c.execute("UPDATE jobs SET state='failed',message=?,updated=? WHERE id=? AND state='planning'",(msg,now(),r['id']))
+   with db() as c:c.execute("UPDATE jobs SET state='failed',shots='[]',message=?,updated=? WHERE id=? AND state='planning'",(msg,now(),r['id']))
+   print('director failed job=%s kind=%s code=%d total_s=%.3f msg=%s'%(r['id'],'image' if images else 'video',code,time.monotonic()-start,msg),flush=True)
 
 def worker_fields(d):
  wid=s(d.get('worker_id'),120);gpu=s(d.get('gpu'),120)
