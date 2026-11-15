@@ -99,6 +99,12 @@ def generated_worker_reuses_files():
             with ThreadPoolExecutor(2) as pool:
                 list(pool.map(env['prepare_model'], [('a.bin', 7), ('b.bin', 7)]))
         assert sorted(calls) == ['a.bin', 'b.bin']
+        # If the fast model source is unavailable, the persistent backup still restores it.
+        def unavailable(**kw): raise OSError('upstream unavailable')
+        def cached(path, *args): path.write_bytes(b'weights'); return True
+        env.update(hf_hub_download=unavailable, restore_cached_model=cached)
+        env['prepare_model'](('c.bin', 7))
+        assert (root/'c.bin').read_bytes()==b'weights'
     print('PASS generated worker prepares files concurrently and reuses intact local models')
 
 
