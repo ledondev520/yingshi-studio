@@ -1,5 +1,5 @@
-"""Consumer Colab's public, scoped REST API; no browser cookies."""
-import time,uuid,requests,base64
+"""Official Colab MCP lifecycle with scoped REST recovery; no browser cookies."""
+import time,uuid,requests,base64,json
 from pathlib import Path
 from urllib.parse import quote
 from datetime import datetime
@@ -25,7 +25,43 @@ def wrap(x):
     return NS(endpoint=x['name'],accelerator=NS(value=spec.get('accelerator','')),runtime_proxy_info=NS(url=info.get('url',''),token=info.get('token',''),expires_at=lambda:datetime.fromisoformat(expiry.replace('Z','+00:00'))))
 class PublicColab:
     def __init__(self,auth):self.s=auth
+    def mcp(self,tool,arguments):
+        call={'jsonrpc':'2.0','id':uuid.uuid4().hex,'method':'tools/call','params':{'name':tool,'arguments':arguments}}
+        r=self.s.request('POST',HOST+'mcp',headers={'Accept':'application/json, text/event-stream'},json=call,timeout=(10,300))
+        r.raise_for_status()
+        if r.headers.get('Content-Type','').split(';')[0].strip()=='text/event-stream':
+            # SSE events may span multiple data lines; only the matching terminal reply counts.
+            reply=None;data=[]
+            for line in r.text.replace('\r\n','\n').split('\n')+['']:
+                if line.startswith('data:'):data.append(line[5:].lstrip(' '))
+                elif not line and data:
+                    event=json.loads('\n'.join(data));data=[]
+                    if isinstance(event,dict) and event.get('id')==call['id']:reply=event
+        else:reply=r.json()
+        if not isinstance(reply,dict) or reply.get('id')!=call['id'] or 'error' in reply:raise ValueError('MCP protocol error')
+        result=reply['result']
+        if not isinstance(result,dict) or result.get('isError'):raise ValueError('MCP tool error')
+        data=result['structuredContent']
+        if not isinstance(data,dict):raise ValueError('MCP result must be an object')
+        if tool in ('get_runtime','create_runtime'):
+            expected=arguments.get('name') or 'runtimes/'+arguments['runtimeId']
+            if data.get('name')!=expected:raise ValueError('MCP returned another runtime')
+        return data
     def req(self,method,path,**kw):
+        tool=None;arguments={}
+        if method=='GET' and path=='v1beta/runtimes':tool='list_runtimes'
+        elif method=='GET' and path.startswith('v1beta/runtimes/'):tool='get_runtime';arguments={'name':path.removeprefix('v1beta/')}
+        elif method=='DELETE' and path.startswith('v1beta/runtimes/'):
+            tool='delete_runtime';arguments={'name':path.removeprefix('v1beta/'),'allowMissing':True}
+        elif method=='POST' and path=='v1beta/runtimes':
+            tool='create_runtime';arguments={'runtime':kw['json'],**kw['params']}
+        if tool:
+            try:
+                data=self.mcp(tool,arguments)
+                return {'done':True,'response':data} if tool=='create_runtime' else data
+            except (requests.RequestException,ValueError,KeyError,TypeError):
+                # The same runtimeId/requestId safely recovers a timed-out create; REST retains ErrorInfo reasons.
+                print('Colab MCP',tool,'using REST recovery',flush=True)
         r=self.s.request(method,HOST+path,timeout=35,**kw);r.raise_for_status();return r.json()
     def list_assignments(self):
         return [wrap(x) for x in self.req('GET','v1beta/runtimes').get('runtimes',[])]

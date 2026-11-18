@@ -95,6 +95,7 @@ echo "[h3-deploy] Running pre-deploy validation checks..."
   python3 validate_scale.py >/dev/null
   python3 validate_launch.py >/dev/null
   python3 validate_runtime_lifecycle.py >/dev/null
+  python3 validate_colab_mcp.py >/dev/null
   python3 validate_multiuser.py >/dev/null
   python3 validate_worker_loop.py >/dev/null
   python3 validate_images.py >/dev/null
