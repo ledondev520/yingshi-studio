@@ -435,6 +435,18 @@ def render_piece(job,ix,path,piece,previous,update):
     _render_piece(job,ix,path,piece,previous,update)
     checkpoint_piece(job,ix,piece,True)
 
+def comfy_state(cid):
+    def history():
+        r=requests.get(base+'/history/'+cid,timeout=20);r.raise_for_status()
+        return r.json().get(cid)
+    state=history()
+    if state:return state,True
+    r=requests.get(base+'/queue',timeout=20);r.raise_for_status();queue=r.json()
+    if any(item[1]==cid for item in queue['queue_running']+queue['queue_pending']):return None,True
+    # A prompt can finish between the history and queue reads.
+    state=history()
+    return state,bool(state)
+
 def _render_piece(job,ix,path,piece,previous,update):
     ident=job['id'];s=job['shots'][ix];d=float(s['seconds'])
     width,height=dimensions(job);pct=int(4+85*ix/len(job['shots']))
@@ -466,21 +478,23 @@ def _render_piece(job,ix,path,piece,previous,update):
         g['140:131']['inputs']['first_frame']=['init',0]
     # Reattach to an already submitted Comfy job if the worker thread restarted in the same VM.
     track=piece.with_suffix('.queue.json') if piece.stem.startswith('helper-') else path/(str(ix)+'-queue.json')
-    cid=None
     if track.exists():
-        saved=json.loads(track.read_text()).get('id')
-        hist=requests.get(base+'/history/'+saved,timeout=10).json()
-        queue=requests.get(base+'/queue',timeout=10).json()
-        if saved in hist or any(el[1]==saved for el in queue.get('queue_running',[])+queue.get('queue_pending',[])):cid=saved
-    if not cid:
-        response=requests.post(base+'/prompt',json={'prompt':g},timeout=30);response.raise_for_status()
-        cid=response.json()['prompt_id'];durable(track,{'id':cid})
-    last=0
+        cid=json.loads(track.read_text())['id']
+        uuid.UUID(cid)
+    else:
+        cid=str(uuid.uuid4())
+        # ComfyUI does not deduplicate IDs: persist before POST and only reattach after an uncertain reply.
+        durable(track,{'id':cid})
+        response=requests.post(base+'/prompt',json={'prompt':g,'prompt_id':cid},timeout=30);response.raise_for_status()
+        if response.json()['prompt_id']!=cid:raise RuntimeError('ComfyUI 返回的任务标识不一致，已停止重复提交')
+    last=0;missing=0
     while True:
         if time.monotonic()-last>=25:
             update('running',pct,f"生成第 {ix+1}/{len(job['shots'])} 镜");last=time.monotonic()
-        state=requests.get(base+'/history/'+cid,timeout=20).json().get(cid)
+        state,found=comfy_state(cid)
         if state:break
+        missing=0 if found else missing+1
+        if missing>=3:raise RuntimeError('ComfyUI 任务已丢失或提交结果不明，已停止等待；已有片段和任务标记已保留')
         time.sleep(4)
     if state.get('status',{}).get('status_str')=='error':raise RuntimeError('H3 生成失败，请查看运行时日志')
     file=next(m for arr in state['outputs']['92'].values() if isinstance(arr,list) for m in arr if isinstance(m,dict) and m.get('filename','').endswith('.mp4'))
