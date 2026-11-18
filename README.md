@@ -2,7 +2,7 @@
 
 输入创意并选择片长，由 Gemini 编排分镜，交给 H3 GPU 工作端渲染、拼接和回传。
 
-这是从现有线上服务导出的可编辑源码快照；发布到 GitHub 不会自动更新线上服务。
+生产服务器通过既有部署定时器跟踪 GitHub `main`；合并后执行校验、切换版本并检查健康状态。
 
 ## 从哪里修改
 
@@ -74,6 +74,12 @@ python3 validate_relay.py /path/to/small-test.mp4
 仓库的起始快照来自 release `sampling-b0f687dbe207`；后续扩容、续跑与连续接单修复见 Git 历史。两个 Google Cloud 项目 ID 在公开源码中使用占位符，部署时须保留自己的真实配置。
 
 `vendor/minimax-h3` 是已有的官方提示词资料快照，来源和固定提交见 [UPSTREAM.md](vendor/minimax-h3/UPSTREAM.md)。第三方资料、模型和依赖仍适用各自许可。本次公开源码未另行授予开源许可证。
+
+## Colab MCP 自动启动
+
+提交图片或视频任务后，现有自动调度器通过 Google 官方 `https://colaboratory.googleapis.com/mcp` 调用 `list_runtimes`、`get_runtime`、`create_runtime` 和 `delete_runtime`，复用服务器私有 OAuth 登录及配额项目。无需每次打开 Colab 网页，也无需新增 API 密钥；GPU 型号、精度、模型、队列和回传流程沿用现有设置。
+
+MCP 返回 JSON 或 SSE；失败时使用原 REST 请求恢复，创建保持相同 `runtimeId`、`requestId` 和规格，避免重复分配，并保留 Google 的额度错误原因。长时间工作仍通过现有 CLI/Jupyter 执行连接运行，持续连接恢复和断点续跑不变。MCP 不提供额外 GPU 配额，不保证库存，也不消除模型下载和加载时间。`python3 validate_colab_mcp.py` 验证协议、运行时复用、创建、释放及失败恢复，不分配真实 GPU。
 
 ## 断点恢复
 
