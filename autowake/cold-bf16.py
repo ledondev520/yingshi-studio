@@ -1,7 +1,7 @@
 import os,sys
 from pathlib import Path
 os.environ['H3_BF16_MODEL_DIR']=str((Path('/mnt/local-scratch') if Path('/mnt/local-scratch').is_mount() else Path('/content'))/'h3-managed-bf16-models')
-Path('/content/h3_bf16.py').write_text('"""Official FL2VA BF16 backend for one supported GPU with at least 80 GB. Invoked only by BF16 workers."""\nimport json\nimport math\nimport os\nimport re\nimport shutil\nimport subprocess\nimport sys\nimport tempfile\nimport time\nfrom concurrent.futures import ThreadPoolExecutor\nfrom pathlib import Path\n\nREV = "42ed227ee7df40d41602854ae760620d6eb651fe"\nDIFFUSERS = "84532a058702c74ae5d1dd6ceb05683fc5d5e768"\nREPO = "MiniMaxAI/MiniMax-H3"\nPARTS = {"transformer", "text_encoder", "vae", "audio_vae", "scheduler", "audio_scheduler", "tokenizer", "processor"}\nFILES = {"LICENSE", "model_index.json", "modular_model_index.json"}\n\n\ndef prepare(progress=None):\n    import psutil\n    from huggingface_hub import HfApi, snapshot_download\n    info = subprocess.check_output(["nvidia-smi", "--query-gpu=name,memory.total,memory.free", "--format=csv,noheader,nounits"], text=True)\n    name, total, free = info.splitlines()[0].rsplit(",", 2)\n    if not re.search(r"\\b(?:[AH]100|G4|RTX\\s+PRO\\s+6000\\s+Blackwell)\\b", name) or int(total)<78000 or int(free)<73500:\n        raise RuntimeError("BF16 需要一张空闲的 A100/H100 80 GB 或 G4 96 GB。")\n    ram = psutil.virtual_memory().available\n    for cap,used in (("/sys/fs/cgroup/memory.max","/sys/fs/cgroup/memory.current"),("/sys/fs/cgroup/memory/memory.limit_in_bytes","/sys/fs/cgroup/memory/memory.usage_in_bytes")):\n        if Path(cap).exists() and Path(used).exists() and (v:=Path(cap).read_text().strip()).isdigit():\n            stat=Path(used).with_name("memory.stat")\n            fields=dict(line.split() for line in stat.read_text().splitlines()) if stat.exists() else {}\n            reclaim=int(fields.get("inactive_file",fields.get("total_inactive_file",0)))\n            ram = min(ram, int(v)-int(Path(used).read_text())+reclaim)\n    if ram < 145*2**30: raise RuntimeError("BF16 工作端支持首帧续拍，请启用高 RAM（建议至少 145 GiB 可用）。")\n    data = Path(os.environ.get("H3_BF16_MODEL_DIR","/content/drive/MyDrive/MiniMax-H3-BF16/models")) / REV\n    data.mkdir(parents=True,exist_ok=True)\n    manifest = {x.rfilename:x.size for x in HfApi().model_info(REPO,revision=REV,files_metadata=True).siblings\n                if x.rfilename in FILES or x.rfilename.partition("/")[0] in PARTS}\n    if not all(any(f.startswith(d+"/") for f in manifest) for d in PARTS) or not all(isinstance(v,int) for v in manifest.values()):\n        raise ValueError("权重清单不完整")\n    def pending(root):\n        return [f for f,n in manifest.items() if not (root/f).is_file() or (root/f).stat().st_size!=n]\n    missing = pending(data)\n    if progress:progress.weights(data,manifest)\n    if missing:\n        if shutil.disk_usage(data).free < sum(manifest[f] for f in missing)+5_000_000_000: raise RuntimeError("Drive 空间不足")\n        snapshot_download(REPO,revision=REV,allow_patterns=sorted(manifest),local_dir=str(data),max_workers=2)\n    if pending(data): raise RuntimeError("Drive 权重不完整")\n    scratch=Path("/mnt/local-scratch")\n    src=data\n    if scratch.is_mount() and scratch not in data.parents:\n        src=scratch/("h3-bf16-"+REV[:7]);src.mkdir(exist_ok=True)\n        missing=pending(src)\n        if progress:progress.weights(src,manifest,\'copying\')\n        if shutil.disk_usage(src).free < sum(manifest[f] for f in missing)+5_000_000_000: raise RuntimeError("本地暂存盘空间不足")\n        def copy(f):\n            dest=src/f;dest.parent.mkdir(parents=True,exist_ok=True)\n            tmp=dest.with_name(dest.name+".part");shutil.copyfile(data/f,tmp)\n            if tmp.stat().st_size!=manifest[f]: raise RuntimeError("暂存分片不完整")\n            tmp.replace(dest)\n        with ThreadPoolExecutor(max_workers=5) as pool:list(pool.map(copy,missing))\n    if progress:progress.stage(\'environment\')\n    venv=Path("/content/minimax-h3-bf16-env"); py=venv/"bin/python"\n    if not py.exists():subprocess.run([sys.executable,"-m","venv","--without-pip","--system-site-packages",str(venv)],check=True)\n    marker=venv/("studio-ready-"+DIFFUSERS)\n    if not marker.is_file():\n        subprocess.run([str(py),"-m","pip","install","--quiet","diffusers @ git+https://github.com/huggingface/diffusers.git@"+DIFFUSERS,"transformers==5.22.2","accelerate>=1.6","huggingface_hub","av","safetensors","sentencepiece"],check=True)\n        subprocess.run([str(py),"-c","import av,torch,torchaudio; from diffusers import ComponentsManager,ModularPipeline; from diffusers.utils.export_utils import encode_video; assert torch.cuda.is_bf16_supported()"],check=True)\n        marker.touch()\n    if progress:progress.stage(\'ready\')\n    return str(py),str(src)\n\n\ndef frame_plan(seconds):\n    target=round(seconds*24)\n    native=max(124,min(345,5+17*math.ceil((target-5)/17)))\n    return native,target\n\n\ndef generate(cfg):\n    import gc\n    import torch\n    from PIL import Image\n    from diffusers import ComponentsManager,ModularPipeline\n    from diffusers.utils.export_utils import encode_video\n    weights=cfg["weights"]\n    def manager():\n        m=ComponentsManager();m.enable_auto_cpu_offload(device="cuda:0",memory_reserve_margin="12GB");return m\n    def chunk_ff(fn):\n        def forward(x):\n            for span in x.split(1024,dim=-2):span.copy_(fn(span))\n            return x\n        return forward\n    args=dict(width=cfg["width"],height=cfg["height"],num_frames=cfg["frames"],num_inference_steps=50,\n              generator=torch.Generator().manual_seed(cfg["seed"]),output=["videos","audio","sampling_rate"])\n    with torch.inference_mode():\n        if not cfg["first"]:\n            flow=ModularPipeline.from_pretrained(weights).blocks.get_workflow("t2va")\n            em=manager()\n            encoder=flow.sub_blocks.pop("text_encoder").init_pipeline(weights,components_manager=em)\n            encoder.load_components(dtype=torch.bfloat16)\n            args["state"]=encoder(prompt=cfg["prompt"])\n            del encoder,em\n            gc.collect();torch.cuda.empty_cache()\n            m=manager();pipe=flow.init_pipeline(weights,components_manager=m)\n        else:\n            m=manager();pipe=ModularPipeline.from_pretrained(weights,workflow="fl2va",components_manager=m)\n            args.update(prompt=cfg["prompt"],image=Image.open(cfg["first"]).convert("RGB"))\n        pipe.load_components(dtype=torch.bfloat16)\n        for block in pipe.transformer.transformer_blocks:block.ff.forward=chunk_ff(block.ff.forward)\n        pipe.vae.enable_tiling(tile_sample_min_height=512,tile_sample_min_width=512)\n        counter=[0]\n        def step(*unused):\n            counter[0]+=1\n            Path(cfg["step_file"]).write_text(str(counter[0]))\n        pipe.transformer.register_forward_hook(step)\n        result=pipe(**args)\n        encode_video(result["videos"][0],fps=24,output_path=cfg["output"],audio=result["audio"][0],audio_sample_rate=result["sampling_rate"])\n\n\ndef render(runtime,job,ix,piece,previous,update,size,seed):\n    if job.get("precision")!="bf16":raise ValueError("BF16 执行端拒绝其他模型任务")\n    seconds=float(job["shots"][ix]["seconds"])\n    native,n=frame_plan(seconds)\n    with tempfile.TemporaryDirectory(dir="/content") as td:\n        tmp=Path(td);base=tmp/"original.mp4";first=tmp/"first.png";steps=tmp/"step"\n        if previous and Path(previous).suffix==".png":first.write_bytes(Path(previous).read_bytes())\n        elif previous:\n            subprocess.run(["ffmpeg","-loglevel","error","-sseof","-0.18","-i",str(previous),"-frames:v","1",str(first)],check=True)\n        cfg=dict(weights=runtime[1],first=str(first) if previous else None,seed=seed,frames=native,\n                 prompt=job["shots"][ix]["prompt"],width=size[0],height=size[1],step_file=str(steps),output=str(base))\n        log=Path("/content/h3-bf16-worker-last.log")\n        with log.open("w") as out:\n            proc=subprocess.Popen([runtime[0],"-u",str(Path(__file__).resolve())],stdin=subprocess.PIPE,stdout=out,stderr=subprocess.STDOUT,text=True,\n                env={**os.environ,"HF_HUB_OFFLINE":"1","TRANSFORMERS_OFFLINE":"1","PYTORCH_CUDA_ALLOC_CONF":"expandable_segments:True"})\n            try:\n                proc.stdin.write(json.dumps(cfg));proc.stdin.close()\n                while True:\n                    k=steps.read_text().strip() if steps.is_file() else ""\n                    note="去噪 "+k+"/49" if k.isdigit() else "加载模型"\n                    update("running",4,f"BF16 · 第 {ix+1}/{len(job[\'shots\'])} 镜 · {note}")\n                    try:rc=proc.wait(timeout=25);break\n                    except subprocess.TimeoutExpired:pass\n                if rc:raise RuntimeError("BF16 生成失败，详见执行端日志")\n            finally:\n                if proc.poll() is None:\n                    proc.terminate()\n                    try:proc.wait(timeout=10)\n                    except subprocess.TimeoutExpired:proc.kill();proc.wait()\n        # Shots shorter than the model\'s minimum are trimmed; only the small gap at the 15 s limit is retimed.\n        ratio=max(1,n/native); film=tmp/"shot.mp4"\n        # Separate finite streams avoid a scheduler deadlock between tpad, fps and apad.\n        vfile=tmp/"v.mp4";afile=tmp/"a.m4a"\n        def ff(*opts):subprocess.run(["ffmpeg","-nostdin","-loglevel","error","-y",*map(str,opts)],timeout=900,check=True)\n        ff("-i",base,"-an","-vf",f"setpts=PTS*{ratio},fps=24,tpad=stop_mode=clone:stop_duration=0.2","-frames:v",n,"-c:v","libx264","-preset","fast","-crf","17",vfile)\n        ff("-i",base,"-vn","-af",f"atempo={1/ratio},apad=pad_dur=1","-t",seconds,"-c:a","aac","-b:a","192k",afile)\n        ff("-i",vfile,"-i",afile,"-map","0:v:0","-map","1:a:0","-c","copy","-t",seconds,"-movflags","+faststart",film)\n        dest=piece.with_suffix(".part");shutil.copyfile(film,dest);dest.replace(piece)\n\n\nif __name__=="__main__":generate(json.load(sys.stdin))\n',encoding='utf-8')
+Path('/content/h3_bf16.py').write_text('"""Official FL2VA BF16 backend for one supported GPU with at least 80 GB. Invoked only by BF16 workers."""\nimport json\nimport math\nimport os\nimport re\nimport shutil\nimport subprocess\nimport sys\nimport tempfile\nimport time\nfrom concurrent.futures import ThreadPoolExecutor\nfrom pathlib import Path\n\nREV = "42ed227ee7df40d41602854ae760620d6eb651fe"\nDIFFUSERS = "84532a058702c74ae5d1dd6ceb05683fc5d5e768"\nREPO = "MiniMaxAI/MiniMax-H3"\nPARTS = {"transformer", "text_encoder", "vae", "audio_vae", "scheduler", "audio_scheduler", "tokenizer", "processor"}\nFILES = {"LICENSE", "model_index.json", "modular_model_index.json"}\n\n\ndef prepare(progress=None):\n    import psutil\n    from huggingface_hub import HfApi, snapshot_download\n    info = subprocess.check_output(["nvidia-smi", "--query-gpu=name,memory.total,memory.free", "--format=csv,noheader,nounits"], text=True)\n    name, total, free = info.splitlines()[0].rsplit(",", 2)\n    if not re.search(r"\\b(?:[AH]100|G4|RTX\\s+PRO\\s+6000\\s+Blackwell)\\b", name) or int(total)<78000 or int(free)<73500:\n        raise RuntimeError("BF16 需要一张空闲的 A100/H100 80 GB 或 G4 96 GB。")\n    ram = psutil.virtual_memory().available\n    for cap,used in (("/sys/fs/cgroup/memory.max","/sys/fs/cgroup/memory.current"),("/sys/fs/cgroup/memory/memory.limit_in_bytes","/sys/fs/cgroup/memory/memory.usage_in_bytes")):\n        if Path(cap).exists() and Path(used).exists() and (v:=Path(cap).read_text().strip()).isdigit():\n            stat=Path(used).with_name("memory.stat")\n            fields=dict(line.split() for line in stat.read_text().splitlines()) if stat.exists() else {}\n            reclaim=int(fields.get("inactive_file",fields.get("total_inactive_file",0)))\n            ram = min(ram, int(v)-int(Path(used).read_text())+reclaim)\n    if ram < 145*2**30: raise RuntimeError("BF16 工作端支持首帧续拍，请启用高 RAM（建议至少 145 GiB 可用）。")\n    data = Path(os.environ.get("H3_BF16_MODEL_DIR","/content/drive/MyDrive/MiniMax-H3-BF16/models")) / REV\n    data.mkdir(parents=True,exist_ok=True)\n    manifest = {x.rfilename:x.size for x in HfApi().model_info(REPO,revision=REV,files_metadata=True).siblings\n                if x.rfilename in FILES or x.rfilename.partition("/")[0] in PARTS}\n    if not all(any(f.startswith(d+"/") for f in manifest) for d in PARTS) or not all(isinstance(v,int) for v in manifest.values()):\n        raise ValueError("权重清单不完整")\n    def pending(root):\n        return [f for f,n in manifest.items() if not (root/f).is_file() or (root/f).stat().st_size!=n]\n    missing = pending(data)\n    if progress:progress.weights(data,manifest)\n    if missing:\n        if shutil.disk_usage(data).free < sum(manifest[f] for f in missing)+5_000_000_000: raise RuntimeError("Drive 空间不足")\n        snapshot_download(REPO,revision=REV,allow_patterns=sorted(manifest),local_dir=str(data),max_workers=6)\n    if pending(data): raise RuntimeError("Drive 权重不完整")\n    scratch=Path("/mnt/local-scratch")\n    src=data\n    if scratch.is_mount() and scratch not in data.parents:\n        src=scratch/("h3-bf16-"+REV[:7]);src.mkdir(exist_ok=True)\n        missing=pending(src)\n        if progress:progress.weights(src,manifest,\'copying\')\n        if shutil.disk_usage(src).free < sum(manifest[f] for f in missing)+5_000_000_000: raise RuntimeError("本地暂存盘空间不足")\n        def copy(f):\n            dest=src/f;dest.parent.mkdir(parents=True,exist_ok=True)\n            tmp=dest.with_name(dest.name+".part");shutil.copyfile(data/f,tmp)\n            if tmp.stat().st_size!=manifest[f]: raise RuntimeError("暂存分片不完整")\n            tmp.replace(dest)\n        with ThreadPoolExecutor(max_workers=5) as pool:list(pool.map(copy,missing))\n    if progress:progress.stage(\'environment\')\n    venv=Path("/content/minimax-h3-bf16-env"); py=venv/"bin/python"\n    if not py.exists():subprocess.run([sys.executable,"-m","venv","--without-pip","--system-site-packages",str(venv)],check=True)\n    marker=venv/("studio-ready-"+DIFFUSERS)\n    if not marker.is_file():\n        subprocess.run([str(py),"-m","pip","install","--quiet","diffusers @ git+https://github.com/huggingface/diffusers.git@"+DIFFUSERS,"transformers==5.22.2","accelerate>=1.6","huggingface_hub","av","safetensors","sentencepiece"],check=True)\n        subprocess.run([str(py),"-c","import av,torch,torchaudio; from diffusers import ComponentsManager,ModularPipeline; from diffusers.utils.export_utils import encode_video; assert torch.cuda.is_bf16_supported()"],check=True)\n        marker.touch()\n    if progress:progress.stage(\'ready\')\n    return str(py),str(src)\n\n\ndef frame_plan(seconds):\n    target=round(seconds*24)\n    native=max(124,min(345,5+17*math.ceil((target-5)/17)))\n    return native,target\n\n\ndef generate(cfg):\n    import gc\n    import torch\n    from PIL import Image\n    from diffusers import ComponentsManager,ModularPipeline\n    from diffusers.utils.export_utils import encode_video\n    weights=cfg["weights"]\n    def manager():\n        m=ComponentsManager();m.enable_auto_cpu_offload(device="cuda:0",memory_reserve_margin="12GB");return m\n    def chunk_ff(fn):\n        def forward(x):\n            for span in x.split(1024,dim=-2):span.copy_(fn(span))\n            return x\n        return forward\n    args=dict(width=cfg["width"],height=cfg["height"],num_frames=cfg["frames"],num_inference_steps=50,\n              generator=torch.Generator().manual_seed(cfg["seed"]),output=["videos","audio","sampling_rate"])\n    with torch.inference_mode():\n        if not cfg["first"]:\n            flow=ModularPipeline.from_pretrained(weights).blocks.get_workflow("t2va")\n            em=manager()\n            encoder=flow.sub_blocks.pop("text_encoder").init_pipeline(weights,components_manager=em)\n            encoder.load_components(dtype=torch.bfloat16)\n            args["state"]=encoder(prompt=cfg["prompt"])\n            del encoder,em\n            gc.collect();torch.cuda.empty_cache()\n            m=manager();pipe=flow.init_pipeline(weights,components_manager=m)\n        else:\n            m=manager();pipe=ModularPipeline.from_pretrained(weights,workflow="fl2va",components_manager=m)\n            args.update(prompt=cfg["prompt"],image=Image.open(cfg["first"]).convert("RGB"))\n        pipe.load_components(dtype=torch.bfloat16)\n        for block in pipe.transformer.transformer_blocks:block.ff.forward=chunk_ff(block.ff.forward)\n        pipe.vae.enable_tiling(tile_sample_min_height=512,tile_sample_min_width=512)\n        counter=[0]\n        def step(*unused):\n            counter[0]+=1\n            Path(cfg["step_file"]).write_text(str(counter[0]))\n        pipe.transformer.register_forward_hook(step)\n        result=pipe(**args)\n        encode_video(result["videos"][0],fps=24,output_path=cfg["output"],audio=result["audio"][0],audio_sample_rate=result["sampling_rate"])\n\n\ndef render(runtime,job,ix,piece,previous,update,size,seed):\n    if job.get("precision")!="bf16":raise ValueError("BF16 执行端拒绝其他模型任务")\n    seconds=float(job["shots"][ix]["seconds"])\n    native,n=frame_plan(seconds)\n    with tempfile.TemporaryDirectory(dir="/content") as td:\n        tmp=Path(td);base=tmp/"original.mp4";first=tmp/"first.png";steps=tmp/"step"\n        if previous and Path(previous).suffix==".png":first.write_bytes(Path(previous).read_bytes())\n        elif previous:\n            subprocess.run(["ffmpeg","-loglevel","error","-sseof","-0.18","-i",str(previous),"-frames:v","1",str(first)],check=True)\n        cfg=dict(weights=runtime[1],first=str(first) if previous else None,seed=seed,frames=native,\n                 prompt=job["shots"][ix]["prompt"],width=size[0],height=size[1],step_file=str(steps),output=str(base))\n        log=Path("/content/h3-bf16-worker-last.log")\n        with log.open("w") as out:\n            proc=subprocess.Popen([runtime[0],"-u",str(Path(__file__).resolve())],stdin=subprocess.PIPE,stdout=out,stderr=subprocess.STDOUT,text=True,\n                env={**os.environ,"HF_HUB_OFFLINE":"1","TRANSFORMERS_OFFLINE":"1","PYTORCH_CUDA_ALLOC_CONF":"expandable_segments:True"})\n            try:\n                proc.stdin.write(json.dumps(cfg));proc.stdin.close()\n                while True:\n                    k=steps.read_text().strip() if steps.is_file() else ""\n                    note="去噪 "+k+"/49" if k.isdigit() else "加载模型"\n                    update("running",4,f"BF16 · 第 {ix+1}/{len(job[\'shots\'])} 镜 · {note}")\n                    try:rc=proc.wait(timeout=25);break\n                    except subprocess.TimeoutExpired:pass\n                if rc:raise RuntimeError("BF16 生成失败，详见执行端日志")\n            finally:\n                if proc.poll() is None:\n                    proc.terminate()\n                    try:proc.wait(timeout=10)\n                    except subprocess.TimeoutExpired:proc.kill();proc.wait()\n        # Shots shorter than the model\'s minimum are trimmed; only the small gap at the 15 s limit is retimed.\n        ratio=max(1,n/native); film=tmp/"shot.mp4"\n        # Separate finite streams avoid a scheduler deadlock between tpad, fps and apad.\n        vfile=tmp/"v.mp4";afile=tmp/"a.m4a"\n        def ff(*opts):subprocess.run(["ffmpeg","-nostdin","-loglevel","error","-y",*map(str,opts)],timeout=900,check=True)\n        ff("-i",base,"-an","-vf",f"setpts=PTS*{ratio},fps=24,tpad=stop_mode=clone:stop_duration=0.2","-frames:v",n,"-c:v","libx264","-preset","fast","-crf","17",vfile)\n        ff("-i",base,"-vn","-af",f"atempo={1/ratio},apad=pad_dur=1","-t",seconds,"-c:a","aac","-b:a","192k",afile)\n        ff("-i",vfile,"-i",afile,"-map","0:v:0","-map","1:a:0","-c","copy","-t",seconds,"-movflags","+faststart",film)\n        dest=piece.with_suffix(".part");shutil.copyfile(film,dest);dest.replace(piece)\n\n\nif __name__=="__main__":generate(json.load(sys.stdin))\n',encoding='utf-8')
 sys.path.insert(0,'/content')
 H3_STUDIO_MODEL='bf16'
 from h3_preparation import Preparation
@@ -271,7 +271,41 @@ if PRECISION=='bf16':
     import h3_bf16
     bf16_runtime=h3_bf16.prepare(_preparation)
 else:
+    import importlib.util, time, requests
+    from concurrent.futures import ThreadPoolExecutor as _BootPool
+    if importlib.util.find_spec('hf_transfer'):os.environ.setdefault('HF_HUB_ENABLE_HF_TRANSFER','1')
     from huggingface_hub import hf_hub_download
+    repo = Path('/content/MiniMax-H3-ComfyUI')
+    base='http://127.0.0.1:8192'
+    try: warm = requests.get(base+'/system_stats',timeout=2).ok
+    except requests.RequestException: warm=False
+    _comfy_rev='1332fabfcc507aa7c548cd5152071ed494c207e8'
+    _turbo_name='minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors'
+    def _prep_comfy():
+        if not repo.exists():
+            try:
+                repo.mkdir(parents=True,exist_ok=True)
+                subprocess.run(['git','-C',str(repo),'init','-q'],check=True)
+                subprocess.run(['git','-C',str(repo),'remote','add','origin','https://github.com/Comfy-Org/ComfyUI.git'],check=True)
+                subprocess.run(['git','-C',str(repo),'fetch','--depth=1','origin',_comfy_rev],check=True)
+                subprocess.run(['git','-C',str(repo),'checkout','-q','FETCH_HEAD'],check=True)
+            except Exception:
+                shutil.rmtree(repo,ignore_errors=True)
+                subprocess.run(['git','clone','--filter=blob:none','https://github.com/Comfy-Org/ComfyUI.git',str(repo)],check=True)
+        if not warm:
+            subprocess.run(['git','-C',str(repo),'checkout','-q',_comfy_rev],check=True)
+            subprocess.run([sys.executable,'-m','pip','install','-q','--prefer-binary','-r',str(repo/'requirements.txt')],check=True)
+    def _prep_turbo():
+        cached=models/'loras'/_turbo_name
+        cached.parent.mkdir(parents=True,exist_ok=True)
+        if cached.is_file() and cached.stat().st_size==1956193000:return
+        try:
+            hf_hub_download(repo_id='lightx2v/Minimax-h3-Turbo',revision='30f485ed874aa44c8183348ad361c5eabad318da',filename=_turbo_name,local_dir=str(cached.parent),force_download=cached.exists(),token=False)
+        except Exception as exc:
+            print('快速加速组件预拉取跳过，按需再下：',type(exc).__name__,flush=True)
+    _boot_pool=_BootPool(max_workers=2)
+    _comfy_fut=_boot_pool.submit(_prep_comfy)
+    _turbo_fut=_boot_pool.submit(_prep_turbo)
     files = {'diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors': 20970379616, 'text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors': 15687142551, 'vae/minimax_h3_audio_vae_fp32.safetensors': 605254808, 'vae/minimax_h3_video_vae_int8_convrot.safetensors': 2811065184}
     _preparation.weights(models,files)
     def prepare_model(pair):
@@ -291,21 +325,20 @@ else:
         list(downloads.map(prepare_model, files.items()))
     print('四个文件已就绪')
     _preparation.stage('environment')
-    import time, requests
-    repo = Path('/content/MiniMax-H3-ComfyUI')
-    base='http://127.0.0.1:8192'
-    try: warm = requests.get(base+'/system_stats',timeout=2).ok
-    except requests.RequestException: warm=False
-    if not repo.exists():
-        subprocess.run(['git', 'clone', '--filter=blob:none', 'https://github.com/Comfy-Org/ComfyUI.git', str(repo)], check=True)
-    if not warm:
-        subprocess.run(['git', '-C', str(repo), 'checkout', '1332fabfcc507aa7c548cd5152071ed494c207e8'], check=True)
-        subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', '-r', str(repo/'requirements.txt')], check=True)
+    try:
+        _comfy_fut.result()
+        _turbo_fut.result()
+    finally:
+        _boot_pool.shutdown(wait=False)
     for name in files:
         link = repo/'models'/name
         link.parent.mkdir(parents=True, exist_ok=True)
         if not link.is_symlink() and not link.exists():
             link.symlink_to(models/name)
+    _turbo_cached=models/'loras'/_turbo_name
+    if _turbo_cached.is_file() and _turbo_cached.stat().st_size==1956193000:
+        _tlink=repo/'models'/'loras'/_turbo_name;_tlink.parent.mkdir(parents=True,exist_ok=True)
+        if not _tlink.is_symlink() and not _tlink.exists():_tlink.symlink_to(_turbo_cached)
     base = 'http://127.0.0.1:8192'
     log = Path('/content/minimax-h3-comfy.log')
     if not warm:
@@ -331,7 +364,7 @@ worker_id=config.get('worker_id','myles-colab-h3')
 ACTIVE_DIR=root/'studio-jobs'; ACTIVE_DIR.mkdir(exist_ok=True)
 runtime_id=hashlib.sha256(subprocess.check_output(['nvidia-smi','--query-gpu=uuid','--format=csv,noheader'])).hexdigest()[:24]
 def rpc(route, obj):
-    r=requests.post(BASE+route,headers={'Authorization':'Bearer '+token},json={'worker_id':worker_id,'gpu':gpu_name,'runtime_id':runtime_id,'precision':PRECISION,'shot_v1':True,'relay_v1':True,'append_v1':True,'turbo8':PRECISION=='quantized','finish_v2':True,**obj},timeout=(8,25),allow_redirects=False)
+    r=requests.post(BASE+route,headers={'Authorization':'Bearer '+token},json={'worker_id':worker_id,'gpu':gpu_name,'runtime_id':runtime_id,'precision':PRECISION,'shot_v1':True,'relay_v1':True,'append_v1':True,'turbo8':PRECISION=='quantized','hd_fast':PRECISION=='quantized','finish_v2':True,**obj},timeout=(8,25),allow_redirects=False)
     r.raise_for_status()
     return r.json() if r.content else {}
 def durable(p,data):
@@ -373,9 +406,9 @@ def append_video(src,tail,dest,geometry):
     vf=f'scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=24,format=yuv420p'
     af='aresample=48000,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS'
     graph=f'[0:v]{vf},setpts=PTS-STARTPTS[v0];[0:a]{af}[a0];[1:v]{vf},setpts=PTS-STARTPTS[v1];[1:a]{af}[a1];[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]'
-    ff('-i',src,'-i',tail,'-filter_complex',graph,'-map','[v]','-map','[a]','-c:v','libx264','-preset','fast','-crf','16','-pix_fmt','yuv420p','-c:a','aac','-b:a','192k','-movflags','+faststart',dest)
+    ff('-i',src,'-i',tail,'-filter_complex',graph,'-map','[v]','-map','[a]','-c:v','libx264','-preset','veryfast','-crf','16','-pix_fmt','yuv420p','-c:a','aac','-b:a','192k','-movflags','+faststart',dest)
 def dimensions(job):
-    is_hd=job.get('quality')=='hd'
+    is_hd=job.get('quality') in ('hd','hd_fast')
     def orientation(txt):
         modes=re.findall(r'竖[屏版幅]|纵向构图|9[：:]16|portrait orientation|vertical video|横[屏版幅]|横向构图|16[：:]9|landscape orientation|正方形|1[：:]1',txt,re.I)
         if not modes:return None
@@ -459,12 +492,12 @@ def _render_piece(job,ix,path,piece,previous,update):
     g['140:131']['inputs'].update(prompt=s.get('h3_prompt') or (str(job['prompt'])+'。本镜头：'+str(s['prompt'])),length=fr,width=width,height=height)
     g['140:129']['inputs']['noise_seed']=int.from_bytes(hashlib.sha256((ident+str(ix)).encode()).digest()[:6],'big')
     g['92']['inputs']['filename_prefix']='video/studio-'+path.name+'-'+piece.stem
-    if job.get('quality')=='fast':
+    if job.get('quality') in ('fast','hd_fast'):
         fname='minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors'
         link=repo/'models'/'loras'/fname; link.parent.mkdir(parents=True,exist_ok=True)
         cached=models/'loras'/fname
         if not cached.exists() or cached.stat().st_size!=1956193000:
-            update('running',pct,'首次准备快速预览组件（约 1.96 GB）')
+            update('running',pct,'首次准备 8 步加速组件（约 1.96 GB）')
             hf_hub_download(repo_id='lightx2v/Minimax-h3-Turbo',revision='30f485ed874aa44c8183348ad361c5eabad318da',filename=fname,local_dir=str(cached.parent),force_download=cached.exists(),token=False)
         if not link.exists():link.symlink_to(cached)
         g['turbo']={'class_type':'LoraLoaderModelOnly','inputs':{'model':['140:127',0],'strength_model':1.0,'lora_name':fname}}
@@ -495,7 +528,7 @@ def _render_piece(job,ix,path,piece,previous,update):
         if state:break
         missing=0 if found else missing+1
         if missing>=3:raise RuntimeError('ComfyUI 任务已丢失或提交结果不明，已停止等待；已有片段和任务标记已保留')
-        time.sleep(4)
+        time.sleep(2)
     if state.get('status',{}).get('status_str')=='error':raise RuntimeError('H3 生成失败，请查看运行时日志')
     file=next(m for arr in state['outputs']['92'].values() if isinstance(arr,list) for m in arr if isinstance(m,dict) and m.get('filename','').endswith('.mp4'))
     temp=piece.with_suffix('.part');shutil.copyfile(repo/'output'/file.get('subfolder','')/file['filename'],temp);temp.replace(piece);_preparation.stage('ready')
@@ -594,7 +627,7 @@ def render_job(job):
     pieces=[path/f'{i:02d}.mp4' for i in range(len(shots))]
     pending=restore_pieces(job,pieces,update)
     width,height=dimensions(job)
-    is_hd=job.get('quality')=='hd'
+    is_hd=job.get('quality') in ('hd','hd_fast')
     while pending:
         pct=int(4+85*(len(shots)-len(pending))/len(shots))
         for ix in sorted(pending):
@@ -634,7 +667,7 @@ def render_job(job):
     else:
         inputs=''.join(f'[v{i}][a{i}]' for i in range(len(pieces)))
         filters.append(inputs+f'concat=n={len(pieces)}:v=1:a=1[v][raw];[raw]loudnorm=I=-16:TP=-1.5:LRA=8,aresample=48000[a]')
-    tmp=path/'delivery.tmp.mp4';ff(*cmd,'-filter_complex',';'.join(filters),'-map','[v]','-map','[a]','-c:v','libx264','-preset','fast','-crf','15' if is_hd else '17','-pix_fmt','yuv420p','-c:a','aac','-b:a','192k','-t',sum(durations),'-movflags','+faststart',tmp)
+    tmp=path/'delivery.tmp.mp4';ff(*cmd,'-filter_complex',';'.join(filters),'-map','[v]','-map','[a]','-c:v','libx264','-preset','veryfast','-crf','15' if is_hd else '17','-pix_fmt','yuv420p','-c:a','aac','-b:a','192k','-t',sum(durations),'-movflags','+faststart',tmp)
     if src:
         joined=path/'joined.tmp.mp4';append_video(src,tmp,joined,job['original_geometry']);joined.replace(final)
     else:tmp.replace(final)
@@ -655,11 +688,12 @@ def worker_loop():
             if job:
                 resume_lease=job['lease_token']
                 render_job(job);resume_lease=''
+                if '_preview_wake' in globals():_preview_wake.set()
             else:
-                resume_lease='';time.sleep(8)
+                resume_lease='';time.sleep(3)
         except Exception as exc:
             if transient_error(exc):
-                time.sleep(8);continue
+                time.sleep(5);continue
             if job:
                 # Terminal render errors fail this job; stale leases cannot affect its new owner.
                 try:rpc('/api/worker/update',{'id':job['id'],'lease_token':job['lease_token'],'state':'failed','progress':0,'message':'生成未完成：'+type(exc).__name__})
@@ -713,6 +747,7 @@ if PRECISION=='quantized':threading.Thread(target=h3_sampling_loop,args=(rpc,ACT
 print('工作台已连接：',BASE,'·',gpu_name,'·',PRECISION)
 
 # H3_PRIVATE_PREVIEW_SYNC_V1
+_preview_wake=threading.Event()
 def _sync_private_previews_once():
     pending=rpc('/api/worker/media-pending',{}).get('jobs',[])
     if not pending:return
@@ -735,9 +770,9 @@ def _studio_preview_loop():
     while True:
         try:
             _sync_private_previews_once()
-            time.sleep(20)
+            _preview_wake.wait(6);_preview_wake.clear()
         except Exception:
-            time.sleep(30)
+            _preview_wake.wait(15);_preview_wake.clear()
 if not globals().get('_h3_preview_worker') or not _h3_preview_worker.is_alive():
     _h3_preview_worker=threading.Thread(target=_studio_preview_loop,daemon=True)
     _h3_preview_worker.start()

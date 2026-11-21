@@ -5,6 +5,7 @@ from urllib.parse import parse_qs, urlsplit
 
 MAX=512*1024*1024
 SLOTS=threading.BoundedSemaphore(2)
+PREVIEW_WAKE=threading.Event()
 def initialize(data):
  directory=data/'media';directory.mkdir(mode=0o700,exist_ok=True)
  (data/'previews').mkdir(mode=0o700,exist_ok=True)
@@ -28,11 +29,11 @@ def make_preview(data,r):
  try:
   if shutil.disk_usage(data).free<3*1024**3+source.stat().st_size:raise OSError('Preview storage low')
   with tempfile.NamedTemporaryFile(dir=dest.parent,suffix='.part',delete=False) as f:tmp=Path(f.name)
-  subprocess.run(['nice','-n','10','ffmpeg','-nostdin','-v','error','-y','-threads','2','-i',str(source),
-   '-map','0:v:0','-map','0:a:0?','-map_metadata','-1','-filter_threads','1','-vf',
+  subprocess.run(['nice','-n','10','ffmpeg','-nostdin','-v','error','-y','-threads','4','-i',str(source),
+   '-map','0:v:0','-map','0:a:0?','-map_metadata','-1','-filter_threads','2','-vf',
    "scale=w='if(gte(iw,ih),min(iw,1280),min(iw,720))':h='if(gte(iw,ih),min(ih,720),min(ih,1280))':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1",
-   '-c:v','libx264','-preset','fast','-crf','26','-maxrate','2500k','-bufsize','5000k',
-   '-threads','2','-pix_fmt','yuv420p','-force_key_frames','expr:gte(t,n_forced*2)',
+   '-c:v','libx264','-preset','veryfast','-crf','26','-maxrate','2500k','-bufsize','5000k',
+   '-threads','4','-pix_fmt','yuv420p','-force_key_frames','expr:gte(t,n_forced*2)',
    '-c:a','aac','-b:a','96k','-movflags','+faststart','-f','mp4',str(tmp)],
    check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=900)
   with tmp.open('rb') as f:
@@ -64,7 +65,7 @@ def run_previews(data,db):
   try:
    if run_preview_once(data,db):continue
   except Exception as e:print('preview queue failed:',type(e).__name__,flush=True)
-  time.sleep(5)
+  PREVIEW_WAKE.wait(5);PREVIEW_WAKE.clear()
 def pending(c,data):
  return [{'id':r['id'],'seconds':r['seconds'],'drive_id':driveid(r)} for r in c.execute("SELECT id,seconds,result,state,media_sha,precision FROM jobs WHERE state='done' AND COALESCE(precision,'quantized')!='image-bf16' ORDER BY created DESC") if driveid(r) and not ready(data,r)][:80]
 def boxes(f,start,end):
@@ -155,6 +156,7 @@ def put(h,jid,data,db,worker,fail):
    else:
     os.replace(tmp,path(data,jid,is_image))
     c.execute('UPDATE jobs SET media_sha=? WHERE id=?',(got,jid))
+    if not is_image:PREVIEW_WAKE.set()
   return h.send(200,{'ok':True,'bytes':n,'sha256':got})
  finally:
   if tmp:tmp.unlink(missing_ok=True)

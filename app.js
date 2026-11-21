@@ -31,6 +31,7 @@ const modelMode = 'quantized';
 const ALLOWED_SECONDS = [15, 30, 45, 60, 75];
 let creationKind = 'video';
 let imageAspect = 'landscape';
+let videoQuality = 'hd_fast';
 let onlineModes = null;
 let serverClockOffset = 0;
 let previewJob = '';
@@ -177,6 +178,7 @@ function paintMode() {
   const image = creationKind === 'image';
   $('promptMeta').textContent = image ? '主体 · 构图 · 光线 · 风格' : '画面 · 动作 · 声音 · 对白';
   $('videoDuration').hidden = image;
+  if ($('videoQuality')) $('videoQuality').hidden = image;
   $('imageCanvas').hidden = !image;
 
   for (const el of document.querySelectorAll('[name=creationKind]')) {
@@ -185,13 +187,21 @@ function paintMode() {
   for (const el of document.querySelectorAll('[name=imageAspect]')) {
     el.checked = el.value === imageAspect;
   }
+  for (const el of document.querySelectorAll('[name=videoQuality]')) {
+    el.checked = el.value === videoQuality;
+  }
 
   const hint = $('qualityHint');
   if (hint) {
     const wake = !image && onlineModes && !onlineModes.includes('quantized') ? ' 提交后自动唤醒 GPU。' : '';
+    const qNote = videoQuality === 'fast'
+      ? '草样 448p（8步极速，出片最快，适合先试创意）'
+      : videoQuality === 'hd'
+        ? '精修 768p（20步完整去噪，画质最细腻但耗时较长）'
+        : '极速 768p（8步加速，保持 768p 高清同时提速 2.5×）';
     hint.textContent = image
       ? '写下简短画面想法即可，系统会自动补全构图与光影细节。'
-      : '量化加速 · 默认 768p。可写明「竖屏」「快速预览」或「保留原声」。' + wake;
+      : qNote + ' · 可写明「竖屏」或「保留原声」。' + wake;
   }
 }
 
@@ -358,6 +368,7 @@ function save(doneLabel = '草稿已保存') {
     kind: creationKind,
     aspect: imageAspect,
     precision: modelMode,
+    quality: videoQuality,
     parent: parentId,
     prompt: $('prompt').value,
     seconds: snapDuration(duration),
@@ -402,6 +413,7 @@ function clearComposer(statusLabel = '已清空', focusInput = true) {
 function paintPrompt(d) {
   creationKind = d?.kind === 'image' ? 'image' : 'video';
   imageAspect = ['square', 'landscape', 'portrait'].includes(d?.aspect) ? d.aspect : 'landscape';
+  videoQuality = ['hd_fast', 'hd', 'fast'].includes(d?.quality) ? d.quality : 'hd_fast';
   paintMode();
   parentId = creationKind === 'image' ? '' : (d?.parent || '');
   paintReply();
@@ -788,6 +800,7 @@ async function rerunJob(j) {
       kind: isImage ? 'image' : 'video',
       aspect: isImage ? inferAspectFromJob(j) : 'landscape',
       precision: modelMode,
+      ...(isImage ? {} : { quality: ['hd_fast', 'hd', 'fast'].includes(j.quality) ? j.quality : videoQuality }),
       seconds: isImage ? 0 : snapDuration(j.seconds),
       parent: isImage ? '' : (j.parent || ''),
       request_id: crypto.randomUUID()
@@ -816,6 +829,7 @@ function fillComposerFromJob(j) {
   if ($('prompt').value.trim() && $('prompt').value !== brief && !confirm('要用这条任务的提示词替换当前输入框内容吗？')) return;
   creationKind = isImage ? 'image' : 'video';
   if (isImage) imageAspect = inferAspectFromJob(j);
+  else videoQuality = ['hd_fast', 'hd', 'fast'].includes(j.quality) ? j.quality : 'hd_fast';
   setWorkKind(creationKind, true);
   paintMode();
   parentId = isImage ? '' : (j.parent || '');
@@ -859,7 +873,7 @@ function buildJobCard(j) {
         (j.total_seconds || j.seconds) + ' 秒',
         j.shots?.length ? j.shots.length + ' 镜' : '',
         j.precision === 'bf16' ? 'BF16' : '',
-        j.quality === 'fast' ? '快速预览' : ''
+        j.quality === 'hd_fast' ? '极速 768p' : j.quality === 'fast' ? '草样 448p' : j.quality === 'hd' ? '精修 768p' : ''
       ].filter(Boolean);
   for (const item of specItems) specs.append(tx('span', item, 'spec'));
   metaRow.append(specs);
@@ -1192,6 +1206,14 @@ document.querySelectorAll('[name=imageAspect]').forEach(el => {
   };
 });
 
+document.querySelectorAll('[name=videoQuality]').forEach(el => {
+  el.onchange = () => {
+    videoQuality = el.value;
+    paintMode();
+    changed();
+  };
+});
+
 $('prompt').oninput = () => {
   showFormMsg('');
   changed();
@@ -1262,6 +1284,7 @@ $('submit').onclick = async () => {
       kind: creationKind,
       aspect: imageAspect,
       precision: modelMode,
+      ...(creationKind === 'image' ? {} : { quality: videoQuality }),
       seconds: snapDuration(duration),
       parent: parentId,
       request_id: requestId

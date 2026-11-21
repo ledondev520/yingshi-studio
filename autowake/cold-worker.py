@@ -265,7 +265,41 @@ if PRECISION=='bf16':
     import h3_bf16
     bf16_runtime=h3_bf16.prepare(_preparation)
 else:
+    import importlib.util, time, requests
+    from concurrent.futures import ThreadPoolExecutor as _BootPool
+    if importlib.util.find_spec('hf_transfer'):os.environ.setdefault('HF_HUB_ENABLE_HF_TRANSFER','1')
     from huggingface_hub import hf_hub_download
+    repo = Path('/content/MiniMax-H3-ComfyUI')
+    base='http://127.0.0.1:8192'
+    try: warm = requests.get(base+'/system_stats',timeout=2).ok
+    except requests.RequestException: warm=False
+    _comfy_rev='1332fabfcc507aa7c548cd5152071ed494c207e8'
+    _turbo_name='minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors'
+    def _prep_comfy():
+        if not repo.exists():
+            try:
+                repo.mkdir(parents=True,exist_ok=True)
+                subprocess.run(['git','-C',str(repo),'init','-q'],check=True)
+                subprocess.run(['git','-C',str(repo),'remote','add','origin','https://github.com/Comfy-Org/ComfyUI.git'],check=True)
+                subprocess.run(['git','-C',str(repo),'fetch','--depth=1','origin',_comfy_rev],check=True)
+                subprocess.run(['git','-C',str(repo),'checkout','-q','FETCH_HEAD'],check=True)
+            except Exception:
+                shutil.rmtree(repo,ignore_errors=True)
+                subprocess.run(['git','clone','--filter=blob:none','https://github.com/Comfy-Org/ComfyUI.git',str(repo)],check=True)
+        if not warm:
+            subprocess.run(['git','-C',str(repo),'checkout','-q',_comfy_rev],check=True)
+            subprocess.run([sys.executable,'-m','pip','install','-q','--prefer-binary','-r',str(repo/'requirements.txt')],check=True)
+    def _prep_turbo():
+        cached=models/'loras'/_turbo_name
+        cached.parent.mkdir(parents=True,exist_ok=True)
+        if cached.is_file() and cached.stat().st_size==1956193000:return
+        try:
+            hf_hub_download(repo_id='lightx2v/Minimax-h3-Turbo',revision='30f485ed874aa44c8183348ad361c5eabad318da',filename=_turbo_name,local_dir=str(cached.parent),force_download=cached.exists(),token=False)
+        except Exception as exc:
+            print('快速加速组件预拉取跳过，按需再下：',type(exc).__name__,flush=True)
+    _boot_pool=_BootPool(max_workers=2)
+    _comfy_fut=_boot_pool.submit(_prep_comfy)
+    _turbo_fut=_boot_pool.submit(_prep_turbo)
     files = {'diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors': 20970379616, 'text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors': 15687142551, 'vae/minimax_h3_audio_vae_fp32.safetensors': 605254808, 'vae/minimax_h3_video_vae_int8_convrot.safetensors': 2811065184}
     _preparation.weights(models,files)
     def prepare_model(pair):
@@ -285,21 +319,20 @@ else:
         list(downloads.map(prepare_model, files.items()))
     print('四个文件已就绪')
     _preparation.stage('environment')
-    import time, requests
-    repo = Path('/content/MiniMax-H3-ComfyUI')
-    base='http://127.0.0.1:8192'
-    try: warm = requests.get(base+'/system_stats',timeout=2).ok
-    except requests.RequestException: warm=False
-    if not repo.exists():
-        subprocess.run(['git', 'clone', '--filter=blob:none', 'https://github.com/Comfy-Org/ComfyUI.git', str(repo)], check=True)
-    if not warm:
-        subprocess.run(['git', '-C', str(repo), 'checkout', '1332fabfcc507aa7c548cd5152071ed494c207e8'], check=True)
-        subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', '-r', str(repo/'requirements.txt')], check=True)
+    try:
+        _comfy_fut.result()
+        _turbo_fut.result()
+    finally:
+        _boot_pool.shutdown(wait=False)
     for name in files:
         link = repo/'models'/name
         link.parent.mkdir(parents=True, exist_ok=True)
         if not link.is_symlink() and not link.exists():
             link.symlink_to(models/name)
+    _turbo_cached=models/'loras'/_turbo_name
+    if _turbo_cached.is_file() and _turbo_cached.stat().st_size==1956193000:
+        _tlink=repo/'models'/'loras'/_turbo_name;_tlink.parent.mkdir(parents=True,exist_ok=True)
+        if not _tlink.is_symlink() and not _tlink.exists():_tlink.symlink_to(_turbo_cached)
     base = 'http://127.0.0.1:8192'
     log = Path('/content/minimax-h3-comfy.log')
     if not warm:
@@ -325,7 +358,7 @@ worker_id=config.get('worker_id','myles-colab-h3')
 ACTIVE_DIR=root/'studio-jobs'; ACTIVE_DIR.mkdir(exist_ok=True)
 runtime_id=hashlib.sha256(subprocess.check_output(['nvidia-smi','--query-gpu=uuid','--format=csv,noheader'])).hexdigest()[:24]
 def rpc(route, obj):
-    r=requests.post(BASE+route,headers={'Authorization':'Bearer '+token},json={'worker_id':worker_id,'gpu':gpu_name,'runtime_id':runtime_id,'precision':PRECISION,'shot_v1':True,'relay_v1':True,'append_v1':True,'turbo8':PRECISION=='quantized','finish_v2':True,**obj},timeout=(8,25),allow_redirects=False)
+    r=requests.post(BASE+route,headers={'Authorization':'Bearer '+token},json={'worker_id':worker_id,'gpu':gpu_name,'runtime_id':runtime_id,'precision':PRECISION,'shot_v1':True,'relay_v1':True,'append_v1':True,'turbo8':PRECISION=='quantized','hd_fast':PRECISION=='quantized','finish_v2':True,**obj},timeout=(8,25),allow_redirects=False)
     r.raise_for_status()
     return r.json() if r.content else {}
 def durable(p,data):
@@ -367,9 +400,9 @@ def append_video(src,tail,dest,geometry):
     vf=f'scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=24,format=yuv420p'
     af='aresample=48000,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS'
     graph=f'[0:v]{vf},setpts=PTS-STARTPTS[v0];[0:a]{af}[a0];[1:v]{vf},setpts=PTS-STARTPTS[v1];[1:a]{af}[a1];[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]'
-    ff('-i',src,'-i',tail,'-filter_complex',graph,'-map','[v]','-map','[a]','-c:v','libx264','-preset','fast','-crf','16','-pix_fmt','yuv420p','-c:a','aac','-b:a','192k','-movflags','+faststart',dest)
+    ff('-i',src,'-i',tail,'-filter_complex',graph,'-map','[v]','-map','[a]','-c:v','libx264','-preset','veryfast','-crf','16','-pix_fmt','yuv420p','-c:a','aac','-b:a','192k','-movflags','+faststart',dest)
 def dimensions(job):
-    is_hd=job.get('quality')=='hd'
+    is_hd=job.get('quality') in ('hd','hd_fast')
     def orientation(txt):
         modes=re.findall(r'竖[屏版幅]|纵向构图|9[：:]16|portrait orientation|vertical video|横[屏版幅]|横向构图|16[：:]9|landscape orientation|正方形|1[：:]1',txt,re.I)
         if not modes:return None
@@ -453,12 +486,12 @@ def _render_piece(job,ix,path,piece,previous,update):
     g['140:131']['inputs'].update(prompt=s.get('h3_prompt') or (str(job['prompt'])+'。本镜头：'+str(s['prompt'])),length=fr,width=width,height=height)
     g['140:129']['inputs']['noise_seed']=int.from_bytes(hashlib.sha256((ident+str(ix)).encode()).digest()[:6],'big')
     g['92']['inputs']['filename_prefix']='video/studio-'+path.name+'-'+piece.stem
-    if job.get('quality')=='fast':
+    if job.get('quality') in ('fast','hd_fast'):
         fname='minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors'
         link=repo/'models'/'loras'/fname; link.parent.mkdir(parents=True,exist_ok=True)
         cached=models/'loras'/fname
         if not cached.exists() or cached.stat().st_size!=1956193000:
-            update('running',pct,'首次准备快速预览组件（约 1.96 GB）')
+            update('running',pct,'首次准备 8 步加速组件（约 1.96 GB）')
             hf_hub_download(repo_id='lightx2v/Minimax-h3-Turbo',revision='30f485ed874aa44c8183348ad361c5eabad318da',filename=fname,local_dir=str(cached.parent),force_download=cached.exists(),token=False)
         if not link.exists():link.symlink_to(cached)
         g['turbo']={'class_type':'LoraLoaderModelOnly','inputs':{'model':['140:127',0],'strength_model':1.0,'lora_name':fname}}
@@ -489,7 +522,7 @@ def _render_piece(job,ix,path,piece,previous,update):
         if state:break
         missing=0 if found else missing+1
         if missing>=3:raise RuntimeError('ComfyUI 任务已丢失或提交结果不明，已停止等待；已有片段和任务标记已保留')
-        time.sleep(4)
+        time.sleep(2)
     if state.get('status',{}).get('status_str')=='error':raise RuntimeError('H3 生成失败，请查看运行时日志')
     file=next(m for arr in state['outputs']['92'].values() if isinstance(arr,list) for m in arr if isinstance(m,dict) and m.get('filename','').endswith('.mp4'))
     temp=piece.with_suffix('.part');shutil.copyfile(repo/'output'/file.get('subfolder','')/file['filename'],temp);temp.replace(piece);_preparation.stage('ready')
@@ -588,7 +621,7 @@ def render_job(job):
     pieces=[path/f'{i:02d}.mp4' for i in range(len(shots))]
     pending=restore_pieces(job,pieces,update)
     width,height=dimensions(job)
-    is_hd=job.get('quality')=='hd'
+    is_hd=job.get('quality') in ('hd','hd_fast')
     while pending:
         pct=int(4+85*(len(shots)-len(pending))/len(shots))
         for ix in sorted(pending):
@@ -628,7 +661,7 @@ def render_job(job):
     else:
         inputs=''.join(f'[v{i}][a{i}]' for i in range(len(pieces)))
         filters.append(inputs+f'concat=n={len(pieces)}:v=1:a=1[v][raw];[raw]loudnorm=I=-16:TP=-1.5:LRA=8,aresample=48000[a]')
-    tmp=path/'delivery.tmp.mp4';ff(*cmd,'-filter_complex',';'.join(filters),'-map','[v]','-map','[a]','-c:v','libx264','-preset','fast','-crf','15' if is_hd else '17','-pix_fmt','yuv420p','-c:a','aac','-b:a','192k','-t',sum(durations),'-movflags','+faststart',tmp)
+    tmp=path/'delivery.tmp.mp4';ff(*cmd,'-filter_complex',';'.join(filters),'-map','[v]','-map','[a]','-c:v','libx264','-preset','veryfast','-crf','15' if is_hd else '17','-pix_fmt','yuv420p','-c:a','aac','-b:a','192k','-t',sum(durations),'-movflags','+faststart',tmp)
     if src:
         joined=path/'joined.tmp.mp4';append_video(src,tmp,joined,job['original_geometry']);joined.replace(final)
     else:tmp.replace(final)
@@ -649,11 +682,12 @@ def worker_loop():
             if job:
                 resume_lease=job['lease_token']
                 render_job(job);resume_lease=''
+                if '_preview_wake' in globals():_preview_wake.set()
             else:
-                resume_lease='';time.sleep(8)
+                resume_lease='';time.sleep(3)
         except Exception as exc:
             if transient_error(exc):
-                time.sleep(8);continue
+                time.sleep(5);continue
             if job:
                 # Terminal render errors fail this job; stale leases cannot affect its new owner.
                 try:rpc('/api/worker/update',{'id':job['id'],'lease_token':job['lease_token'],'state':'failed','progress':0,'message':'生成未完成：'+type(exc).__name__})
@@ -707,6 +741,7 @@ if PRECISION=='quantized':threading.Thread(target=h3_sampling_loop,args=(rpc,ACT
 print('工作台已连接：',BASE,'·',gpu_name,'·',PRECISION)
 
 # H3_PRIVATE_PREVIEW_SYNC_V1
+_preview_wake=threading.Event()
 def _sync_private_previews_once():
     pending=rpc('/api/worker/media-pending',{}).get('jobs',[])
     if not pending:return
@@ -729,9 +764,9 @@ def _studio_preview_loop():
     while True:
         try:
             _sync_private_previews_once()
-            time.sleep(20)
+            _preview_wake.wait(6);_preview_wake.clear()
         except Exception:
-            time.sleep(30)
+            _preview_wake.wait(15);_preview_wake.clear()
 if not globals().get('_h3_preview_worker') or not _h3_preview_worker.is_alive():
     _h3_preview_worker=threading.Thread(target=_studio_preview_loop,daemon=True)
     _h3_preview_worker.start()
