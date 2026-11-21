@@ -281,7 +281,7 @@ class Handler(BaseHTTPRequestHandler):
      occupied=bool(active or shot_tasks.busy(c,wid,t))
      assist=None
      if not occupied:
-      r=c.execute("SELECT * FROM jobs WHERE state='queued' AND (total_seconds IS NULL OR total_seconds=seconds OR ?) AND COALESCE(precision,'quantized')=? AND (COALESCE(quality,'standard')='standard' OR (quality='fast' AND ?) OR (quality='hd' AND ?)) AND (COALESCE(audio_mode,'original')='original' OR ?) ORDER BY created,id LIMIT 1",(int(d.get('append_v1') is True),mode,int(d.get('turbo8') is True),int(d.get('finish_v2') is True),int(d.get('finish_v2') is True))).fetchone()
+      r=c.execute("SELECT * FROM jobs WHERE state='queued' AND (total_seconds IS NULL OR total_seconds=seconds OR ?) AND COALESCE(precision,'quantized')=? AND (COALESCE(quality,'standard')='standard' OR (quality='fast' AND ?) OR (quality='hd' AND ?) OR (quality='hd_fast' AND ?)) AND (COALESCE(audio_mode,'original')='original' OR ?) ORDER BY created,id LIMIT 1",(int(d.get('append_v1') is True),mode,int(d.get('turbo8') is True),int(d.get('finish_v2') is True),int(d.get('hd_fast') is True),int(d.get('finish_v2') is True))).fetchone()
       if r:
        c.execute("UPDATE jobs SET state='running',message='GPU 已领取任务',progress=0,wid=?,gpu=?,lease=?,deadline=?,updated=?,tries=tries+1 WHERE id=?",(wid,gpu,secrets.token_urlsafe(24),t+600,t,r['id']))
        r=c.execute("SELECT * FROM jobs WHERE id=?",(r['id'],)).fetchone()
@@ -389,7 +389,7 @@ class Handler(BaseHTTPRequestHandler):
     out={'ok':True,'device_id':r['device'],'gpu':r['gpu']}
    elif p=='/api/draft' and self.command=='POST':
     if not isinstance(d.get('shots',[]),list):fail(400,'分镜有误')
-    draft={'kind':'image' if d.get('kind')=='image' else 'video','aspect':d.get('aspect') if d.get('aspect') in image_director.SIZES else 'landscape','precision':'quantized','audio_mode':d.get('audio_mode') if d.get('audio_mode') in ('auto','original','continuous') else 'auto','quality':d.get('quality') if d.get('quality') in ('fast','hd','standard') else 'hd','parent':s(d.get('parent'),100),'route':d.get('route') if d.get('route') in ('continuous','story','dialogue','mood') else 'story','prompt':s(d.get('prompt'),4000),'seconds':d.get('seconds') if type(d.get('seconds')) is int and d['seconds'] in director.ALLOWED_SECONDS else 15,'shots':[{'prompt':s(i.get('prompt'),40000),'seconds':i.get('seconds') if i.get('seconds') in (5,10,15) else 15} for i in d.get('shots',[])[:12] if isinstance(i,dict)]}
+    draft={'kind':'image' if d.get('kind')=='image' else 'video','aspect':d.get('aspect') if d.get('aspect') in image_director.SIZES else 'landscape','precision':'quantized','audio_mode':d.get('audio_mode') if d.get('audio_mode') in ('auto','original','continuous') else 'auto','quality':d.get('quality') if d.get('quality') in ('fast','hd','hd_fast','standard') else 'hd_fast','parent':s(d.get('parent'),100),'route':d.get('route') if d.get('route') in ('continuous','story','dialogue','mood') else 'story','prompt':s(d.get('prompt'),4000),'seconds':d.get('seconds') if type(d.get('seconds')) is int and d['seconds'] in director.ALLOWED_SECONDS else 15,'shots':[{'prompt':s(i.get('prompt'),40000),'seconds':i.get('seconds') if i.get('seconds') in (5,10,15) else 15} for i in d.get('shots',[])[:12] if isinstance(i,dict)]}
     c.execute('INSERT INTO drafts VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,updated=excluded.updated',(pack(draft),now()));out={'ok':True}
    elif mc and self.command=='GET':
     r=c.execute('SELECT * FROM jobs WHERE id=?',(mc[1],)).fetchone()
@@ -404,7 +404,7 @@ class Handler(BaseHTTPRequestHandler):
     if kind=='image' and parent:fail(400,'图片不支持视频续拍')
     raw_am='original' if kind=='image' else d.get('audio_mode');raw_q='standard' if kind=='image' else d.get('quality')
     if raw_am is not None and raw_am not in ('auto','original','continuous'):fail(400,'无效的声音设置')
-    if raw_q is not None and raw_q not in ('auto','standard','fast','hd'):fail(400,'无效生成模式')
+    if raw_q is not None and raw_q not in ('auto','standard','fast','hd','hd_fast'):fail(400,'无效生成模式')
     explicit_q=None if raw_q in (None,'auto') else raw_q
     if not brief or type(sec) is not int or not (sec==0 if kind=='image' else sec in director.ALLOWED_SECONDS) or not re.fullmatch(r'[a-zA-Z0-9-]{16,100}',req):fail(400,'请输入创意，并选择 15、30、45、60 或 75 秒。')
     r=c.execute('SELECT * FROM jobs WHERE request=?',(req,)).fetchone()
@@ -438,7 +438,7 @@ class Handler(BaseHTTPRequestHandler):
     if mode=='bf16' and quality!='hd':fail(400,'BF16 使用原始 768p 配置')
     audio_mode=d.get('audio_mode','original')
     if audio_mode not in ('original','auto','continuous'):fail(400,'无效的声音设置')
-    if quality not in ('standard','fast','hd'):fail(400,'无效生成模式')
+    if quality not in ('standard','fast','hd','hd_fast'):fail(400,'无效生成模式')
     prompt,shots,sec=project_data(d);req=s(d.get('request_id'),100)
     if not re.fullmatch(r'[a-zA-Z0-9-]{16,100}',req):fail(400,'请求编号无效')
     parent=s(d.get('parent'),100) or None; brief=prompt

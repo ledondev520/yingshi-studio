@@ -45,7 +45,7 @@ def prepare(progress=None):
     if progress:progress.weights(data,manifest)
     if missing:
         if shutil.disk_usage(data).free < sum(manifest[f] for f in missing)+5_000_000_000: raise RuntimeError("Drive 空间不足")
-        snapshot_download(REPO,revision=REV,allow_patterns=sorted(manifest),local_dir=str(data),max_workers=2)
+        snapshot_download(REPO,revision=REV,allow_patterns=sorted(manifest),local_dir=str(data),max_workers=6)
     if pending(data): raise RuntimeError("Drive 权重不完整")
     scratch=Path("/mnt/local-scratch")
     src=data

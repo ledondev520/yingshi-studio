@@ -97,7 +97,7 @@ def quota_feedback():
         c.execute("insert into jobs(id,shots,seconds,state,route,prompt) values('j','[]',15,'planning','continuous','t')")
     cl=Mock()
     def refused(stable,variant,model,**kw):
-        raise m.Capacity('NO_RUNTIMES' if model==m.Accelerator.H100 else 'TOO_MANY_ACTIVE_RUNTIMES')
+        raise m.Capacity('TOO_MANY_ACTIVE_RUNTIMES' if model==m.Accelerator.G4 else 'NO_RUNTIMES')
     cl.assign.side_effect=refused
     with patch.object(m,'StateStore'),patch.object(m,'creds'),patch.object(m,'PublicColab',return_value=cl):
         slot=m.Slot(0);slot.step();slot.step()
@@ -105,7 +105,13 @@ def quota_feedback():
         with m.database() as c:
             assert m.fleet.cluster_summary(c,int(time.time()))['runtime_limit']
             assert c.execute('select stage from pool_signal').fetchone()[0]=='limit'
- print('PASS planning preflight, H100/A100/G4 fast-first order, limit feedback survives backoff')
+            c.execute('delete from pool_retry');c.execute('delete from pool_signal')
+        # When the very first model hits TOO_MANY_ACTIVE_RUNTIMES, stop immediately without wasting calls on A100/G4.
+        cl.assign.reset_mock()
+        cl.assign.side_effect=lambda *a,**kw:(_ for _ in ()).throw(m.Capacity('TOO_MANY_ACTIVE_RUNTIMES'))
+        slot.step()
+        assert [call.args[2] for call in cl.assign.call_args_list]==[m.Accelerator.H100]
+ print('PASS planning preflight, H100/A100/G4 fast-first order, limit short-circuit and feedback survival')
 if __name__=='__main__':quota_feedback()
 
 def runtime_recovery():
@@ -233,5 +239,21 @@ def preempt_and_orphan_reclaim():
         s_idle_img.step()
         assert 'runtimes/h3-'+'c'*24 in freed,'Idle image-bf16 slot must immediately release for queued video job'
         assert not s_idle_img.cache.get('endpoint')
- print('PASS orphan h3-* sweep (preserving manual user notebooks) and immediate cross-mode preemption')
+        # 3) Busy Slot 0 still sweeps newly discovered orphan h3-* VMs periodically without touching its own busy VM or user notebooks!
+        orphan2='runtimes/h3-'+'d'*24
+        s_busy.boot_mono-=20;s_busy.last_sweep=0
+        cl.list_assignments.side_effect=lambda:[SimpleNamespace(endpoint=busy_ep),SimpleNamespace(endpoint=user_notebook_ep),SimpleNamespace(endpoint=orphan2)]
+        s_busy.step()
+        assert orphan2 in freed and busy_ep not in freed and user_notebook_ep not in freed
+        # 4) An idle quantized worker missing hd_fast capability preempts immediately when only hd_fast work is waiting!
+        s_legacy=m.Slot(3);legacy_ep='runtimes/h3-'+'e'*24
+        s_legacy.cache.update(endpoint=legacy_ep,mode='quantized',born=t-20,last=t-2);s_legacy.persist()
+        with m.database() as c:
+            c.execute("delete from jobs where id in ('q1','q2')")
+            c.execute("insert into workers values(?,'A100',?)",(s_legacy.device+'/gpu',t))
+            m.fleet.register(c,s_legacy.device+'/gpu',dict(shot_v1=True,relay_v1=True,finish_v2=True,turbo8=True,append_v1=True))
+            c.execute("insert into jobs(id,shots,seconds,state,route,quality,prompt) values('q_hdfast','[]',15,'queued','continuous','hd_fast','t')")
+        s_legacy.step()
+        assert legacy_ep in freed and not s_legacy.cache.get('endpoint')
+ print('PASS orphan h3-* sweep (busy & idle, preserving manual user notebooks), cross-mode and capability-upgrade preemption')
 if __name__=='__main__':preempt_and_orphan_reclaim()

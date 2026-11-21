@@ -48,7 +48,7 @@ def prepare():
     if shutil.disk_usage(CACHE).free<sum(manifest[n] for n in missing)+8_000_000_000:raise RuntimeError('生图权重缓存磁盘空间不足。')
     if missing:
         print('准备原版权重 GB',round(sum(manifest[n] for n in missing)/1e9,2),flush=True)
-        snapshot_download('MiniMaxAI/MiniMax-H3-Image',revision=REVISION,local_dir=str(CACHE),allow_patterns=missing,max_workers=2)
+        snapshot_download('MiniMaxAI/MiniMax-H3-Image',revision=REVISION,local_dir=str(CACHE),allow_patterns=missing,max_workers=6)
     assert all((CACHE/n).is_file() and (n=='modular_model_index.json' or (CACHE/n).stat().st_size==size) for n,size in manifest.items())
     index=json.loads((CACHE/'modular_model_index.json').read_text())
     for v in index.values():

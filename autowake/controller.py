@@ -191,10 +191,14 @@ class Slot:
                 shot_relay.gc(c,DATA,t)
             live=online(c,wid,t)
             mine,helps=working(c,wid,t)
+            raw_needs=fleet.need(c,t)
             needs=deficit(c,wid,t)
             want=choose(c,wid,t,mode if owned or a.get('pending') else None,needs)
+            incompatible=bool(owned and live and not mine and not helps and raw_needs and not fleet.device_compatible_with_pending(c,wid,t))
+            if incompatible:
+                want=None
             limited_any=bool(c.execute("select 1 from pool_signal where stage='limit' and until>?",(t,)).fetchone())
-            other_demand=bool(needs) or limited_any
+            other_demand=bool(needs) or limited_any or incompatible
             prep_failed=bool(c.execute("select 1 from pool_preparation where device=? and stage='failed'",(wid,)).fetchone())
             if not TOKEN.exists():return
             if live:
@@ -203,16 +207,22 @@ class Slot:
             elif not want:
                 c.execute("delete from pool_signal where device=? and stage NOT IN ('denied','limit')",(wid,))
                 c.execute('delete from pool_boots where device=?',(wid,))
+            do_sweep=self.index==0 and time.monotonic()-self.boot_mono>=15 and t-self.last_sweep>=120
             if not owned and not a.get('pending') and not want:
-                if self.index==0 and time.monotonic()-self.boot_mono>=15 and t-self.last_sweep>=180:
+                if do_sweep:
                     self.last_sweep=t;evict_orphans(PublicColab(creds()))
                 return
-            if not owned and not a.get('pending') and a.get('retry',0)>t:return
+            if not owned and not a.get('pending') and a.get('retry',0)>t:
+                if do_sweep:
+                    self.last_sweep=t;evict_orphans(PublicColab(creds()))
+                return
             if not live and want:
                 c.execute('insert or replace into pool_signal values(?,?,?,?)',(wid,want,'loading' if owned else 'request',t+600))
                 c.execute('insert or replace into pool_boots values(?,?,?)',(wid,want,t+600))
             playback_win=45 if (not want and other_demand) else 180
             playback=c.execute("select 1 from jobs where instr(wid,?||'/')=1 and state='done' and media_sha is null and updated>? limit 1",(wid,t-playback_win)).fetchone()
+        if do_sweep:
+            self.last_sweep=t;evict_orphans(PublicColab(creds()))
         if live and a.get('crashes'):a.pop('crashes',None);self.persist()
         if mine or helps or playback:a['last']=t;self.persist()
         idle_ttl=0 if (not want and other_demand) else (45 if not live else IDLE)
@@ -244,8 +254,8 @@ class Slot:
                 for model in models:
                     try:return cl.assign(uuid.UUID(a['notebook']),Variant.GPU,model,highmem=highmem),lim
                     except Capacity as exc:
-                        lim=lim or str(exc)=='TOO_MANY_ACTIVE_RUNTIMES'
-                        if model==models[-1]:raise Capacity('TOO_MANY_ACTIVE_RUNTIMES' if lim else str(exc)) from exc
+                        if str(exc)=='TOO_MANY_ACTIVE_RUNTIMES':raise Capacity('TOO_MANY_ACTIVE_RUNTIMES') from exc
+                        if model==models[-1]:raise Capacity(str(exc)) from exc
                 return None,lim
             limited=False
             try:
@@ -298,7 +308,7 @@ def loop(i):
     while True:
         try:slot.step()
         except Exception as e:print(slot.name,type(e).__name__,flush=True)
-        time.sleep(12)
+        time.sleep(4)
 def main():
     import multiprocessing
     os.umask(0o077);lock=open(PRIVATE/'pool.lock','a');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)

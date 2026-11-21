@@ -13,16 +13,18 @@ def requeue_device(c,device,t):
     c.execute("UPDATE shot_tasks SET state='open',helper=NULL,ticket=NULL,deadline=NULL,size=NULL WHERE state='taken' AND instr(helper,?||'/')=1",(device,))
     return count
 def setup(c):
-    c.execute('create table if not exists worker_caps(id text primary key,shots int,relay int,hd int,fast int,append_ok int)')
+    c.execute('create table if not exists worker_caps(id text primary key,shots int,relay int,hd int,fast int,append_ok int,hd_fast int default 0)')
+    cols={r[1] for r in c.execute('pragma table_info(worker_caps)')}
+    if 'hd_fast' not in cols:c.execute('alter table worker_caps add column hd_fast int default 0')
     c.execute('create table if not exists pool_signal(device text primary key,mode text,stage text,until integer)')
     c.execute('create table if not exists worker_drain(device text primary key)')
 def register(c,wid,d):
-    c.execute('insert or replace into worker_caps values(?,?,?,?,?,?)',(wid,*(int(d.get(k) is True) for k in ('shot_v1','relay_v1','finish_v2','turbo8','append_v1'))))
+    c.execute('insert or replace into worker_caps(id,shots,relay,hd,fast,append_ok,hd_fast) values(?,?,?,?,?,?,?)',(wid,*(int(d.get(k) is True) for k in ('shot_v1','relay_v1','finish_v2','turbo8','append_v1','hd_fast'))))
 def cuts(shots,route):
     return [i for i,s in enumerate(shots) if i and s.get('cut') is True] if len(shots)>=3 and route!='continuous' else []
 def device(wid):return wid.partition('/')[0]
 def _live_workers(c,t):
-    return {r['id']:r for r in c.execute("""SELECT w.id,coalesce(m.precision,'quantized') mode,k.shots,k.relay,k.hd,k.fast,k.append_ok
+    return {r['id']:r for r in c.execute("""SELECT w.id,coalesce(m.precision,'quantized') mode,k.shots,k.relay,k.hd,k.fast,k.append_ok,coalesce(k.hd_fast,0) hd_fast
         FROM workers w LEFT JOIN worker_modes m ON m.id=w.id LEFT JOIN worker_caps k ON k.id=w.id
         WHERE w.seen>? AND NOT EXISTS(SELECT 1 FROM worker_drain d WHERE w.id=d.device OR instr(w.id,d.device||'/')=1)""",(t-FRESH,))}
 def _compatible(wr,j):
@@ -31,8 +33,9 @@ def _compatible(wr,j):
     am=j['audio_mode'] or 'original'
     tot=j['total_seconds'] if 'total_seconds' in j.keys() else None
     return (wr['mode']==mode and
-        ((q!='hd' and am=='original') or bool(wr['hd'])) and
+        ((q not in ('hd','hd_fast') and am=='original') or bool(wr['hd'])) and
         (q!='fast' or bool(wr['fast'])) and
+        (q!='hd_fast' or bool(wr['hd_fast'])) and
         (not tot or tot==j['seconds'] or bool(wr['append_ok'])))
 def need(c,t):
     workers=_live_workers(c,t)
@@ -65,6 +68,14 @@ def need(c,t):
             if w:idle.remove(w);avail.remove(w)
             elif relay:missing.append(mode)
     return missing
+
+def device_compatible_with_pending(c,dev,t):
+    workers=[wr for wid,wr in _live_workers(c,t).items() if device(wid)==dev]
+    if not workers:return True
+    jobs=list(c.execute("select * from jobs where state in ('planning','queued')"))
+    if any(_compatible(wr,j) for wr in workers for j in jobs):return True
+    open_jobs=list(c.execute("select distinct j.* from jobs j join shot_tasks s on s.job_id=j.id and s.epoch=j.lease where j.state='running' and s.state='open'"))
+    return any(_compatible(wr,j) for wr in workers for j in open_jobs)
 
 def queue_position(c,job,t=None):
     if not job or job['state']!='queued':return None

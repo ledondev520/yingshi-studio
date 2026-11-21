@@ -34,11 +34,11 @@ def claim(c,wid,d,t,jobrow):
     row=c.execute("""SELECT s.job_id,s.ix FROM shot_tasks s JOIN jobs j ON j.id=s.job_id
         WHERE j.state='running' AND j.lease=s.epoch AND j.wid!=?
         AND COALESCE(j.precision,'quantized')=? AND (substr(j.wid,1,instr(j.wid,'/'))=? OR (? AND EXISTS(SELECT 1 FROM worker_caps k WHERE k.id=j.wid AND k.relay=1))) AND s.state='open'
-        AND (coalesce(j.quality,'standard')='standard' OR (j.quality='fast' AND ?) OR (j.quality='hd' AND ?))
+        AND (coalesce(j.quality,'standard')='standard' OR (j.quality='fast' AND ?) OR (j.quality='hd' AND ?) OR (j.quality='hd_fast' AND ?))
         AND (SELECT count(*) FROM shot_tasks h WHERE h.job_id=s.job_id AND h.epoch=s.epoch
              AND h.state='taken' AND h.deadline>=?) < ?
         ORDER BY j.created, s.ix LIMIT 1""",
-        (wid,d.get('precision','quantized'),wid.split('/')[0]+'/',int(d.get('relay_v1') is True),int(d.get('turbo8') is True),int(d.get('finish_v2') is True),t,MAX_HELPERS)).fetchone()
+        (wid,d.get('precision','quantized'),wid.split('/')[0]+'/',int(d.get('relay_v1') is True),int(d.get('turbo8') is True),int(d.get('finish_v2') is True),int(d.get('hd_fast') is True),t,MAX_HELPERS)).fetchone()
     if not row:return
     jid,ix=row
     ticket=secrets.token_hex(16)

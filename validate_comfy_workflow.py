@@ -81,4 +81,29 @@ def run():
         assert found and state['outputs']=={'92':{}} and not reads
         print('PASS completion racing a queue read is recovered from history')
 
+        # hd_fast must combine full 768p HD (1344x768) with the 8-step Turbo LoRA.
+        dim_fn=[n for n in ast.parse(source).body if isinstance(n,ast.FunctionDef) and n.name=='dimensions']
+        import re as _re
+        dim_env={'re':_re}
+        exec(compile(ast.Module(body=dim_fn,type_ignores=[]),'<dims>','exec'),dim_env)
+        assert dim_env['dimensions']({'quality':'hd_fast','prompt':'scene','shots':[{'prompt':'scene'}]})==(1344,768)
+        assert dim_env['dimensions']({'quality':'fast','prompt':'scene','shots':[{'prompt':'scene'}]})==(768,448)
+        lora=root/'models'/'loras'/'minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors'
+        lora.parent.mkdir(parents=True,exist_ok=True)
+        with lora.open('wb') as f:f.truncate(1956193000)
+        env['models']=root/'models';env['dimensions']=dim_env['dimensions']
+        env['graph']={key:{'inputs':{}} for key in ('140:131','140:129','140:124','140:126','140:127','92')}
+        env['requests'].get=get
+        submitted=[]
+        def post_capture(url,**kw):
+            submitted.append(kw['json']['prompt'])
+            return post(url,**kw)
+        env['requests'].post=post_capture
+        hd_fast_job={'id':'b'*32,'quality':'hd_fast','prompt':'scene','shots':[{'seconds':3,'prompt':'scene'}]}
+        p2=root/'job2';p2.mkdir();piece2=p2/'00.mp4';failure[0]=False;missing[0]=False;ticks[0]=0
+        env['_render_piece'](hd_fast_job,0,p2,piece2,None,lambda *x:None)
+        assert submitted[-1]['140:131']['inputs']['width']==1344 and submitted[-1]['140:131']['inputs']['height']==768
+        assert submitted[-1]['140:124']['inputs']['steps']==8 and 'turbo' in submitted[-1]
+        print('PASS hd_fast renders full 1344x768 768p with 8-step Turbo LoRA')
+
 if __name__=='__main__':run()
